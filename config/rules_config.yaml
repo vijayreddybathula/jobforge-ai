@@ -1,0 +1,51 @@
+# Rules Engine Configuration
+
+# Hard constraints that will reject jobs before scoring
+hard_constraints:
+  visa_requirements:
+    enabled: true
+    reject_if_requires_citizenship: true
+    reject_if_requires_security_clearance: false  # User configurable
+  
+  location:
+    enabled: true
+    reject_onsite_if_remote_required: true
+    reject_hybrid_if_remote_required: true
+  
+  salary:
+    enabled: true
+    min_salary_usd: 0  # User configurable
+  
+  seniority:
+    enabled: true
+    reject_if_too_junior: false  # User configurable
+    reject_if_too_senior: false  # User configurable
+  
+  employment_type:
+    enabled: true
+    reject_contract_if_fulltime_required: true
+
+# Company policies
+company_policies:
+  allowlist: []  # Companies to always consider
+  denylist: []  # Companies to always reject
+  cooldown_days: 30  # Days between applications to same company
+  max_applications_per_month: 10  # Max applications per company per month
+
+# Source-specific policies
+source_policies:
+  linkedin:
+    rate_limit_per_hour: 10
+    prefer_official_api: false
+  glassdoor:
+    rate_limit_per_hour: 5
+    prefer_official_api: false
+  workday:
+    rate_limit_per_hour: 20
+    prefer_official_api: true
+  greenhouse:
+    rate_limit_per_hour: 30
+    prefer_official_api: true
+  lever:
+    rate_limit_per_hour: 30
+    prefer_official_api: true

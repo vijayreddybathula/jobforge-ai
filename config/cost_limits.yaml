@@ -1,0 +1,33 @@
+# Cost Management Configuration
+
+# Per-user daily limits
+user_limits:
+  daily_llm_cost_usd: 10.0
+  monthly_llm_cost_usd: 200.0
+  daily_operations: 100
+
+# Global limits
+global_limits:
+  daily_llm_cost_usd: 50.0
+  monthly_llm_cost_usd: 1000.0
+
+# Alert thresholds
+alerts:
+  budget_warning_percent: 80
+  budget_critical_percent: 100
+  budget_overrun_percent: 120
+
+# Cost tracking
+tracking:
+  track_per_operation: true
+  track_per_user: true
+  track_per_source: true
+  daily_reports: true
+  monthly_reports: true
+
+# Cost optimization
+optimization:
+  auto_throttle_on_limit: true
+  downgrade_model_on_limit: true
+  cache_aggressively: true
+  target_cache_hit_rate: 0.60
