@@ -1,0 +1,43 @@
+{
+  "profile_template": {
+    "core_roles": [],
+    "skills": {
+      "languages": [],
+      "frameworks": [],
+      "genai": [],
+      "infra": [],
+      "data": []
+    },
+    "constraints": {
+      "visa": "",
+      "location": "",
+      "remote_only": false,
+      "min_base_usd": 0
+    },
+    "approved_bullets": []
+  },
+  "example": {
+    "core_roles": ["Senior Software Engineer", "Staff Engineer", "Engineering Manager"],
+    "skills": {
+      "languages": ["Python", "TypeScript", "Go"],
+      "frameworks": ["FastAPI", "React", "Next.js"],
+      "genai": ["OpenAI API", "LangChain", "RAG"],
+      "infra": ["AWS", "Docker", "Kubernetes"],
+      "data": ["PostgreSQL", "Redis", "Elasticsearch"]
+    },
+    "constraints": {
+      "visa": "H1B",
+      "location": "Remote or San Francisco, CA",
+      "remote_only": true,
+      "min_base_usd": 180000
+    },
+    "approved_bullets": [
+      {
+        "id": "BY-001",
+        "text": "Built GenAI-powered job matching system using OpenAI API and RAG architecture",
+        "tags": ["genai", "openai", "rag"],
+        "metrics": {"users": 10000}
+      }
+    ]
+  }
+}
