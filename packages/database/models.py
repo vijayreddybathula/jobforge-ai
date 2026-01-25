@@ -50,6 +50,7 @@ class Resume(Base):
     
     resume_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    version = Column(Integer, default=1)  # Version number for this user's resumes
     file_path = Column(String(500), nullable=False)
     file_name = Column(String(255), nullable=False)
     file_type = Column(String(50))  # pdf, docx

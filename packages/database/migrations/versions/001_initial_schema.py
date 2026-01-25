@@ -39,6 +39,7 @@ def upgrade() -> None:
         'resumes',
         sa.Column('resume_id', postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column('user_id', postgresql.UUID(as_uuid=True), sa.ForeignKey('users.user_id'), nullable=False),
+        sa.Column('version', sa.Integer(), nullable=False, server_default='1'),
         sa.Column('file_path', sa.String(500), nullable=False),
         sa.Column('file_name', sa.String(255), nullable=False),
         sa.Column('file_type', sa.String(50)),
