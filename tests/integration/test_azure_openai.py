@@ -26,6 +26,7 @@ class TestAzureOpenAIIntegration:
     def test_azure_endpoint_format(self):
         """Verify Azure endpoint has correct format"""
         endpoint = os.getenv("AZURE_OPENAPI_ENDPOINT")
+        assert endpoint is not None, "Endpoint should not be None"
         assert endpoint.startswith("https://"), "Endpoint should use HTTPS"
         assert ".openai.azure.com" in endpoint, "Endpoint should be Azure OpenAI domain"
 
