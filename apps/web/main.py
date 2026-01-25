@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from packages.database.connection import init_database, create_tables
 from packages.common.redis_cache import init_redis_cache
 from packages.common.logging import setup_logging, get_logger
-from apps.web.api import resume
 
 # Load environment variables
 load_dotenv()
@@ -17,6 +16,26 @@ load_dotenv()
 # Setup logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = get_logger(__name__)
+
+# Initialize Redis BEFORE importing API modules
+redis_host = os.getenv("REDIS_HOST", "localhost")
+redis_port = int(os.getenv("REDIS_PORT", "6379"))
+redis_db = int(os.getenv("REDIS_DB", "0"))
+redis_password = os.getenv("REDIS_PASSWORD")
+
+try:
+    init_redis_cache(
+        host=redis_host,
+        port=redis_port,
+        db=redis_db,
+        password=redis_password
+    )
+    logger.info("Redis cache initialized")
+except Exception as e:
+    logger.warning(f"Failed to initialize Redis cache: {e}")
+
+# Now safe to import API modules
+from apps.web.api import resume
 
 
 @asynccontextmanager
