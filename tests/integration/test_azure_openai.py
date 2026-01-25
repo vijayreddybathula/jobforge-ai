@@ -3,9 +3,12 @@ Integration tests for Azure OpenAI integration.
 Tests job parsing, analysis, and scoring with Azure GPT-4.
 """
 
+
 import os
 import pytest
 from unittest.mock import patch, MagicMock
+from dotenv import load_dotenv
+load_dotenv()
 
 
 class TestAzureOpenAIIntegration:
@@ -36,54 +39,51 @@ class TestAzureOpenAIIntegration:
         assert data["database"] == "connected", "Database should be connected"
         assert data["redis"] == "connected", "Redis should be connected"
 
-    @patch("services.jd_parser.azure_client")
-    def test_job_parsing_with_azure(self, mock_azure_client):
+    @patch("services.jd_parser.jd_parser.JDParser")
+    def test_job_parsing_with_azure(self, mock_jdparser):
         """Test job description parsing uses Azure GPT-4"""
-        # Mock Azure response
-        mock_azure_client.return_value = {
+        # Mock JDParser instance
+        instance = mock_jdparser.return_value
+        instance.parse.return_value = {
             "job_title": "Senior Software Engineer",
             "company": "Tech Corp",
             "skills": ["Python", "Azure", "Docker"],
             "experience_required": "5+ years"
         }
-        
         # Simulate job parsing
-        job_data = mock_azure_client()
-        
+        job_data = instance.parse("Some job description")
         assert job_data["job_title"] == "Senior Software Engineer"
         assert "Azure" in job_data["skills"]
-        mock_azure_client.assert_called_once()
+        instance.parse.assert_called_once()
 
-    @patch("services.resume_analyzer.azure_client")
-    def test_resume_analysis_with_azure(self, mock_azure_client):
+    @patch("services.resume_analyzer.role_extractor.RoleExtractor")
+    def test_resume_analysis_with_azure(self, mock_role_extractor):
         """Test resume analysis uses Azure GPT-4"""
-        mock_azure_client.return_value = {
+        instance = mock_role_extractor.return_value
+        instance.analyze_resume.return_value = {
             "summary": "Experienced full-stack developer",
             "skills": ["Python", "Docker", "Kubernetes"],
             "experience_years": 7,
             "education": "BS Computer Science"
         }
-        
-        resume_data = mock_azure_client()
-        
+        resume_data = instance.analyze_resume("Some resume text")
         assert resume_data["experience_years"] == 7
         assert "Kubernetes" in resume_data["skills"]
-        mock_azure_client.assert_called_once()
+        instance.analyze_resume.assert_called_once()
 
-    @patch("services.scoring.azure_client")
-    def test_job_scoring_with_azure(self, mock_azure_client):
+    @patch("services.scoring.scoring_service.ScoringService")
+    def test_job_scoring_with_azure(self, mock_scoring_service):
         """Test job scoring uses Azure GPT-4"""
-        mock_azure_client.return_value = {
+        instance = mock_scoring_service.return_value
+        instance.score_job.return_value = {
             "match_score": 8.5,
             "reasons": ["Strong skills match", "Experience aligned"],
             "recommendation": "HIGHLY_RECOMMENDED"
         }
-        
-        score = mock_azure_client()
-        
+        score = instance.score_job("job_id", "user_id", {}, {}, {})
         assert score["match_score"] >= 0 and score["match_score"] <= 10
         assert score["recommendation"] in ["HIGHLY_RECOMMENDED", "RECOMMENDED", "NOT_RECOMMENDED"]
-        mock_azure_client.assert_called_once()
+        instance.score_job.assert_called_once()
 
 
 class TestAzureCostTracking:

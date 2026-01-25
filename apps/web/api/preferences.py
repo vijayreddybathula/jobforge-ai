@@ -13,6 +13,7 @@ from packages.schemas.user_preferences import (
 )
 from packages.common.redis_cache import get_redis_cache
 from packages.common.logging import get_logger
+from apps.web.auth import get_current_user
 
 logger = get_logger(__name__)
 
@@ -26,13 +27,10 @@ def _get_cache_key(user_id: UUID) -> str:
 
 @router.get("", response_model=UserPreferencesResponse)
 async def get_preferences(
+    user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
-    # user_id: UUID = Depends(get_current_user)  # TODO: Add authentication
 ):
     """Get user preferences (with Redis cache)."""
-    # TODO: Get user_id from authenticated user
-    user_id = UUID("00000000-0000-0000-0000-000000000001")  # Placeholder
-    
     cache = get_redis_cache()
     cache_key = _get_cache_key(user_id)
     
@@ -81,13 +79,10 @@ async def get_preferences(
 @router.post("", response_model=UserPreferencesResponse)
 async def create_preferences(
     preferences: UserPreferencesCreate,
+    user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
-    # user_id: UUID = Depends(get_current_user)  # TODO: Add authentication
 ):
     """Create user preferences."""
-    # TODO: Get user_id from authenticated user
-    user_id = UUID("00000000-0000-0000-0000-000000000001")  # Placeholder
-    
     # Check if user exists
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
@@ -155,13 +150,10 @@ async def create_preferences(
 @router.put("", response_model=UserPreferencesResponse)
 async def update_preferences(
     preferences: UserPreferencesUpdate,
+    user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
-    # user_id: UUID = Depends(get_current_user)  # TODO: Add authentication
 ):
     """Update user preferences."""
-    # TODO: Get user_id from authenticated user
-    user_id = UUID("00000000-0000-0000-0000-000000000001")  # Placeholder
-    
     # Get existing preferences
     db_preferences = db.query(UserPreferences).filter(
         UserPreferences.user_id == user_id

@@ -4,14 +4,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 from packages.database.connection import init_database, create_tables
 from packages.common.redis_cache import init_redis_cache
 from packages.common.logging import setup_logging, get_logger
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from the project root
+project_root = Path(__file__).parent.parent.parent
+load_dotenv(project_root / ".env")
 
 # Setup logging
 setup_logging(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -36,6 +38,14 @@ except Exception as e:
 
 # Now safe to import API modules
 from apps.web.api import resume
+from apps.web.api import preferences
+from apps.web.api import jobs
+from apps.web.api import scoring
+from apps.web.api import decision
+from apps.web.api import artifacts
+from apps.web.api import apply
+from apps.web.api import outcomes
+from apps.web.api import user
 
 
 @asynccontextmanager
@@ -89,20 +99,14 @@ app.add_middleware(
 
 # Include routers
 app.include_router(resume.router, prefix="/api/v1")
-from apps.web.api import preferences
 app.include_router(preferences.router, prefix="/api/v1")
-from apps.web.api import jobs
 app.include_router(jobs.router, prefix="/api/v1")
-from apps.web.api import scoring
 app.include_router(scoring.router, prefix="/api/v1")
-from apps.web.api import decision
 app.include_router(decision.router, prefix="/api/v1")
-from apps.web.api import artifacts
 app.include_router(artifacts.router, prefix="/api/v1")
-from apps.web.api import apply
 app.include_router(apply.router, prefix="/api/v1")
-from apps.web.api import outcomes
 app.include_router(outcomes.router, prefix="/api/v1")
+app.include_router(user.router, prefix="/api/v1")
 
 
 @app.get("/")
