@@ -8,7 +8,7 @@ from services.resume_analyzer.role_extractor import RoleExtractor
 def test_resume_parsing_flow():
     """Test complete resume parsing flow."""
     parser = ResumeParser()
-    
+
     # Create sample resume content
     resume_text = """
     John Doe
@@ -21,10 +21,10 @@ def test_resume_parsing_flow():
     
     Skills: Python, TypeScript, Machine Learning, Cloud Infrastructure
     """
-    
+
     # Parse resume
     result = parser._parse_sections(resume_text)
-    
+
     assert "experience" in result
     assert "skills" in result
     assert len(result["experience"]) > 0

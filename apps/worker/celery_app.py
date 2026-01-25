@@ -16,12 +16,7 @@ redis_db = int(os.getenv("REDIS_DB", "0"))
 redis_password = os.getenv("REDIS_PASSWORD")
 
 try:
-    init_redis_cache(
-        host=redis_host,
-        port=redis_port,
-        db=redis_db,
-        password=redis_password
-    )
+    init_redis_cache(host=redis_host, port=redis_port, db=redis_db, password=redis_password)
 except Exception as e:
     print(f"Warning: Failed to initialize Redis cache: {e}")
 
@@ -37,8 +32,8 @@ celery_app = Celery(
     include=[
         "apps.worker.tasks.job_ingestion",
         "apps.worker.tasks.jd_parsing",
-        "apps.worker.tasks.scoring"
-    ]
+        "apps.worker.tasks.scoring",
+    ],
 )
 
 # Celery configuration

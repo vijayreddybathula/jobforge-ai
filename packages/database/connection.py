@@ -18,7 +18,7 @@ SessionLocal = None
 def init_database(database_url: str, echo: bool = False) -> None:
     """Initialize database connection."""
     global engine, SessionLocal
-    
+
     engine = create_engine(
         database_url,
         echo=echo,
@@ -26,9 +26,9 @@ def init_database(database_url: str, echo: bool = False) -> None:
         pool_size=10,
         max_overflow=20,
     )
-    
+
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    
+
     logger.info("Database connection initialized")
 
 
@@ -36,7 +36,7 @@ def create_tables() -> None:
     """Create all database tables."""
     if engine is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
-    
+
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created")
 
@@ -45,7 +45,7 @@ def get_db() -> Generator[Session, None, None]:
     """Get database session."""
     if SessionLocal is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
-    
+
     db = SessionLocal()
     try:
         yield db

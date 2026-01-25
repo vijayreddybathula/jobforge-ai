@@ -9,7 +9,7 @@ from packages.database.models import UserPreferences, User
 from packages.schemas.user_preferences import (
     UserPreferencesCreate,
     UserPreferencesUpdate,
-    UserPreferencesResponse
+    UserPreferencesResponse,
 )
 from packages.common.redis_cache import get_redis_cache
 from packages.common.logging import get_logger
@@ -33,24 +33,22 @@ async def get_preferences(
     """Get user preferences (with Redis cache)."""
     cache = get_redis_cache()
     cache_key = _get_cache_key(user_id)
-    
+
     # Try cache first
     cached = cache.get(cache_key)
     if cached:
         logger.debug(f"Preferences cache hit for user {user_id}")
         return UserPreferencesResponse(**cached)
-    
+
     # Get from database
-    preferences = db.query(UserPreferences).filter(
-        UserPreferences.user_id == user_id
-    ).first()
-    
+    preferences = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+
     if not preferences:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found. Please create preferences first."
+            detail="Preferences not found. Please create preferences first.",
         )
-    
+
     # Convert to response
     response_data = {
         "preferences_id": preferences.preferences_id,
@@ -67,12 +65,12 @@ async def get_preferences(
         "other_constraints": preferences.other_constraints,
         "is_ready": preferences.is_ready,
         "created_at": preferences.created_at.isoformat(),
-        "updated_at": preferences.updated_at.isoformat()
+        "updated_at": preferences.updated_at.isoformat(),
     }
-    
+
     # Cache response (1 hour TTL)
     cache.set(cache_key, response_data, ttl=3600)
-    
+
     return UserPreferencesResponse(**response_data)
 
 
@@ -86,27 +84,24 @@ async def create_preferences(
     # Check if user exists
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
     # Check if preferences already exist
-    existing = db.query(UserPreferences).filter(
-        UserPreferences.user_id == user_id
-    ).first()
-    
+    existing = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Preferences already exist. Use PUT to update."
+            detail="Preferences already exist. Use PUT to update.",
         )
-    
+
     # Create preferences
     db_preferences = UserPreferences(
         user_id=user_id,
         visa_status=preferences.visa_status,
-        location_preferences=preferences.location_preferences.dict() if preferences.location_preferences else None,
+        location_preferences=(
+            preferences.location_preferences.dict() if preferences.location_preferences else None
+        ),
         disability_status=preferences.disability_status,
         disability_accommodations=preferences.disability_accommodations,
         salary_min_usd=preferences.salary_min_usd,
@@ -115,19 +110,19 @@ async def create_preferences(
         industry_preferences=preferences.industry_preferences,
         work_authorization=preferences.work_authorization,
         other_constraints=preferences.other_constraints,
-        is_ready=False
+        is_ready=False,
     )
-    
+
     db.add(db_preferences)
     db.commit()
     db.refresh(db_preferences)
-    
+
     # Invalidate cache
     cache = get_redis_cache()
     cache.delete(_get_cache_key(user_id))
-    
+
     logger.info(f"Preferences created for user {user_id}")
-    
+
     return UserPreferencesResponse(
         preferences_id=db_preferences.preferences_id,
         user_id=db_preferences.user_id,
@@ -143,7 +138,7 @@ async def create_preferences(
         other_constraints=db_preferences.other_constraints,
         is_ready=db_preferences.is_ready,
         created_at=db_preferences.created_at.isoformat(),
-        updated_at=db_preferences.updated_at.isoformat()
+        updated_at=db_preferences.updated_at.isoformat(),
     )
 
 
@@ -155,16 +150,14 @@ async def update_preferences(
 ):
     """Update user preferences."""
     # Get existing preferences
-    db_preferences = db.query(UserPreferences).filter(
-        UserPreferences.user_id == user_id
-    ).first()
-    
+    db_preferences = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+
     if not db_preferences:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found. Use POST to create."
+            detail="Preferences not found. Use POST to create.",
         )
-    
+
     # Update fields
     update_data = preferences.dict(exclude_unset=True)
     for field, value in update_data.items():
@@ -174,16 +167,16 @@ async def update_preferences(
             setattr(db_preferences, field, value)
         else:
             setattr(db_preferences, field, value)
-    
+
     db.commit()
     db.refresh(db_preferences)
-    
+
     # Invalidate cache
     cache = get_redis_cache()
     cache.delete(_get_cache_key(user_id))
-    
+
     logger.info(f"Preferences updated for user {user_id}")
-    
+
     return UserPreferencesResponse(
         preferences_id=db_preferences.preferences_id,
         user_id=db_preferences.user_id,
@@ -199,5 +192,5 @@ async def update_preferences(
         other_constraints=db_preferences.other_constraints,
         is_ready=db_preferences.is_ready,
         created_at=db_preferences.created_at.isoformat(),
-        updated_at=db_preferences.updated_at.isoformat()
+        updated_at=db_preferences.updated_at.isoformat(),
     )

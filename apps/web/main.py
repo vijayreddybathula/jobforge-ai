@@ -26,12 +26,7 @@ redis_db = int(os.getenv("REDIS_DB", "0"))
 redis_password = os.getenv("REDIS_PASSWORD")
 
 try:
-    init_redis_cache(
-        host=redis_host,
-        port=redis_port,
-        db=redis_db,
-        password=redis_password
-    )
+    init_redis_cache(host=redis_host, port=redis_port, db=redis_db, password=redis_password)
     logger.info("Redis cache initialized")
 except Exception as e:
     logger.warning(f"Failed to initialize Redis cache: {e}")
@@ -53,29 +48,24 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     # Startup
     logger.info("Starting application...")
-    
+
     # Initialize database
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         init_database(database_url, echo=os.getenv("DEBUG", "false").lower() == "true")
         logger.info("Database initialized")
-    
+
     # Initialize Redis
     redis_host = os.getenv("REDIS_HOST", "localhost")
     redis_port = int(os.getenv("REDIS_PORT", "6379"))
     redis_db = int(os.getenv("REDIS_DB", "0"))
     redis_password = os.getenv("REDIS_PASSWORD")
-    
-    init_redis_cache(
-        host=redis_host,
-        port=redis_port,
-        db=redis_db,
-        password=redis_password
-    )
+
+    init_redis_cache(host=redis_host, port=redis_port, db=redis_db, password=redis_password)
     logger.info("Redis cache initialized")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application...")
 
@@ -85,7 +75,7 @@ app = FastAPI(
     title="JobForge AI",
     description="Intelligent job application agent",
     version="0.1.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -112,11 +102,7 @@ app.include_router(user.router, prefix="/api/v1")
 @app.get("/")
 async def root():
     """Root endpoint."""
-    return {
-        "message": "JobForge AI API",
-        "version": "0.1.0",
-        "status": "running"
-    }
+    return {"message": "JobForge AI API", "version": "0.1.0", "status": "running"}
 
 
 @app.get("/health")
@@ -125,15 +111,16 @@ async def health_check():
     return {
         "status": "healthy",
         "database": "connected",  # TODO: Check database connection
-        "redis": "connected"  # TODO: Check Redis connection
+        "redis": "connected",  # TODO: Check Redis connection
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "apps.web.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=os.getenv("DEBUG", "false").lower() == "true"
+        reload=os.getenv("DEBUG", "false").lower() == "true",
     )

@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class RedisCache:
     """Redis cache manager with automatic serialization."""
-    
+
     def __init__(
         self,
         host: str = "localhost",
@@ -32,7 +32,7 @@ class RedisCache:
             socket_timeout=5,
         )
         self._test_connection()
-    
+
     def _test_connection(self) -> None:
         """Test Redis connection."""
         try:
@@ -40,7 +40,7 @@ class RedisCache:
         except RedisError as e:
             logger.warning(f"Redis connection failed: {e}. Caching will be disabled.")
             self.client = None
-    
+
     def _is_available(self) -> bool:
         """Check if Redis is available."""
         if self.client is None:
@@ -50,20 +50,20 @@ class RedisCache:
             return True
         except RedisError:
             return False
-    
+
     def _generate_key(self, prefix: str, identifier: str) -> str:
         """Generate cache key."""
         return f"{prefix}{identifier}"
-    
+
     def _hash_content(self, content: str) -> str:
         """Generate hash for content."""
         return hashlib.sha256(content.encode()).hexdigest()
-    
+
     def get(self, key: str) -> Optional[Any]:
         """Get value from cache."""
         if not self._is_available():
             return None
-        
+
         try:
             value = self.client.get(key)
             if value is None:
@@ -72,12 +72,12 @@ class RedisCache:
         except (RedisError, json.JSONDecodeError) as e:
             logger.warning(f"Cache get failed for key {key}: {e}")
             return None
-    
+
     def set(self, key: str, value: Any, ttl: int = 3600) -> bool:
         """Set value in cache with TTL."""
         if not self._is_available():
             return False
-        
+
         try:
             serialized = json.dumps(value)
             self.client.setex(key, ttl, serialized)
@@ -85,102 +85,84 @@ class RedisCache:
         except (RedisError, TypeError) as e:
             logger.warning(f"Cache set failed for key {key}: {e}")
             return False
-    
+
     def delete(self, key: str) -> bool:
         """Delete key from cache."""
         if not self._is_available():
             return False
-        
+
         try:
             self.client.delete(key)
             return True
         except RedisError as e:
             logger.warning(f"Cache delete failed for key {key}: {e}")
             return False
-    
-    def get_or_set(
-        self,
-        key: str,
-        value_func: callable,
-        ttl: int = 3600,
-        *args,
-        **kwargs
-    ) -> Any:
+
+    def get_or_set(self, key: str, value_func: callable, ttl: int = 3600, *args, **kwargs) -> Any:
         """Get from cache or set using value function."""
         # Try to get from cache
         cached = self.get(key)
         if cached is not None:
             return cached
-        
+
         # Generate value
         value = value_func(*args, **kwargs)
-        
+
         # Store in cache
         self.set(key, value, ttl)
-        
+
         return value
-    
-    def get_by_content_hash(
-        self,
-        prefix: str,
-        content: str,
-        ttl: int = 3600
-    ) -> Optional[Any]:
+
+    def get_by_content_hash(self, prefix: str, content: str, ttl: int = 3600) -> Optional[Any]:
         """Get value by content hash."""
         content_hash = self._hash_content(content)
         key = self._generate_key(prefix, content_hash)
         return self.get(key)
-    
-    def set_by_content_hash(
-        self,
-        prefix: str,
-        content: str,
-        value: Any,
-        ttl: int = 3600
-    ) -> bool:
+
+    def set_by_content_hash(self, prefix: str, content: str, value: Any, ttl: int = 3600) -> bool:
         """Set value by content hash."""
         content_hash = self._hash_content(content)
         key = self._generate_key(prefix, content_hash)
         return self.set(key, value, ttl)
-    
+
     def increment(self, key: str, amount: int = 1) -> Optional[int]:
         """Increment counter."""
         if not self._is_available():
             return None
-        
+
         try:
             return self.client.incrby(key, amount)
         except RedisError as e:
             logger.warning(f"Cache increment failed for key {key}: {e}")
             return None
-    
+
     def exists(self, key: str) -> bool:
         """Check if key exists."""
         if not self._is_available():
             return False
-        
+
         try:
             return bool(self.client.exists(key))
         except RedisError:
             return False
-    
+
     def add_to_set(self, key: str, value: str) -> bool:
         """Add value to Redis set."""
         if not self._is_available():
             return False
-        
+
         try:
             self.client.sadd(key, value)
             return True
         except RedisError as e:
             logger.warning(f"Add to set failed for key {key}: {e}")
             return False
-    
+
     def is_in_set(self, key: str, value: str) -> bool:
         """Check if value is in Redis set."""
         if not self._is_available():
             return False
-        
+
         try:
             return bool(self.client.sismember(key, value))
         except RedisError:
@@ -193,7 +175,6 @@ redis_cache: Optional[RedisCache] = None
 
 def get_redis_cache() -> RedisCache:
     """Get global Redis cache instance."""
-    global redis_cache
     if redis_cache is None:
         raise RuntimeError("Redis cache not initialized. Call init_redis_cache() first.")
     return redis_cache

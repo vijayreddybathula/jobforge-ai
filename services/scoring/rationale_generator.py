@@ -13,43 +13,43 @@ logger = get_logger(__name__)
 
 class RationaleGenerator:
     """Generate human-readable rationale for scores using LLM."""
-    
+
     def __init__(self):
         """Initialize rationale generator."""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
-        
+
         self.client = OpenAI(api_key=api_key)
         self.cache = LLMCache(ttl=604800)  # 7 days
         self.model = "gpt-3.5-turbo"  # Use cheaper model for rationale
-    
+
     def generate(
         self,
         score: int,
         breakdown: Dict[str, int],
         parsed_jd: ParsedJD,
-        user_skills: Dict[str, Any]
+        user_skills: Dict[str, Any],
     ) -> str:
         """Generate rationale for score.
-        
+
         Args:
             score: Total fit score
             breakdown: Score breakdown by category
             parsed_jd: Parsed job description
             user_skills: User skills
-        
+
         Returns:
             Human-readable rationale
         """
         # Create cache key
         cache_key = f"{parsed_jd.role}:{score}:{json.dumps(breakdown, sort_keys=True)}"
-        
+
         # Check cache
         cached = self.cache.get(cache_key)
         if cached:
             return cached
-        
+
         # Generate prompt
         prompt = f"""Explain why this job has a fit score of {score}/100.
 
@@ -71,20 +71,23 @@ Provide a concise 2-3 sentence explanation highlighting strengths and gaps."""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert at explaining job fit scores. Be concise and helpful."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "You are an expert at explaining job fit scores. Be concise and helpful.",
+                    },
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0.5,
-                max_tokens=150
+                max_tokens=150,
             )
-            
+
             rationale = response.choices[0].message.content.strip()
-            
+
             # Cache result
             self.cache.set(cache_key, rationale)
-            
+
             return rationale
-            
+
         except Exception as e:
             logger.error(f"Rationale generation failed: {e}")
             # Return fallback
