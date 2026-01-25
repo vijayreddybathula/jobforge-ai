@@ -102,7 +102,7 @@ class LinkedInScraper:
         Returns:
             List of job data dictionaries
         """
-        jobs = []
+        jobs: List[Dict[str, Any]] = []
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)

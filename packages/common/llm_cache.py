@@ -1,6 +1,6 @@
 """LLM response caching utilities."""
 
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 import hashlib
 from packages.common.redis_cache import get_redis_cache
 from packages.common.logging import get_logger
@@ -56,7 +56,9 @@ class LLMCache:
         key = self._get_key(content_hash)
         return self.cache.set(key, response, ttl=self.ttl)
 
-    def get_or_call(self, content: str, llm_func: callable, *args, **kwargs) -> Any:
+    def get_or_call(
+        self, content: str, llm_func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
         """Get from cache or call LLM function.
 
         Args:

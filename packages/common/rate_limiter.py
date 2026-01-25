@@ -114,7 +114,7 @@ class DistributedLock:
         self.key = f"lock:{key}"
         self.timeout = timeout
         self.cache = get_redis_cache()
-        self.lock_value = None
+        self.lock_value: Optional[str] = None
 
     def acquire(self, blocking: bool = True, timeout: Optional[int] = None) -> bool:
         """Acquire lock.

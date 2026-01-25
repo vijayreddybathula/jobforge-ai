@@ -2,7 +2,7 @@
 
 import json
 import hashlib
-from typing import Any, Optional
+from typing import Any, Optional, Callable, cast
 import redis
 from redis.exceptions import RedisError
 import logging
@@ -22,14 +22,14 @@ class RedisCache:
         decode_responses: bool = True,
     ):
         """Initialize Redis connection."""
-        self.client = redis.Redis(
+        self.client: Any = redis.Redis(
             host=host,
             port=port,
             db=db,
             password=password,
-            decode_responses=decode_responses,
-            socket_connect_timeout=5,
-            socket_timeout=5,
+            socket_timeout=5.0,
+            socket_connect_timeout=5.0,
+            decode_responses=cast(Any, decode_responses),
         )
         self._test_connection()
 
@@ -98,7 +98,9 @@ class RedisCache:
             logger.warning(f"Cache delete failed for key {key}: {e}")
             return False
 
-    def get_or_set(self, key: str, value_func: callable, ttl: int = 3600, *args, **kwargs) -> Any:
+    def get_or_set(
+        self, key: str, value_func: Callable[..., Any], ttl: int = 3600, *args: Any, **kwargs: Any
+    ) -> Any:
         """Get from cache or set using value function."""
         # Try to get from cache
         cached = self.get(key)
@@ -131,7 +133,8 @@ class RedisCache:
             return None
 
         try:
-            return self.client.incrby(key, amount)
+            result: Any = self.client.incrby(key, amount)
+            return result if isinstance(result, int) else None
         except RedisError as e:
             logger.warning(f"Cache increment failed for key {key}: {e}")
             return None
