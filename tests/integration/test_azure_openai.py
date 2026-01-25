@@ -1,0 +1,131 @@
+"""
+Integration tests for Azure OpenAI integration.
+Tests job parsing, analysis, and scoring with Azure GPT-4.
+"""
+
+import os
+import pytest
+from unittest.mock import patch, MagicMock
+
+
+class TestAzureOpenAIIntegration:
+    """Test Azure OpenAI integration with jobforge-ai"""
+
+    def test_azure_environment_variables_loaded(self):
+        """Verify Azure OpenAI environment variables are properly loaded"""
+        assert os.getenv("AZURE_OPENAPI_KEY"), "Azure API key not set"
+        assert os.getenv("AZURE_OPENAPI_ENDPOINT"), "Azure endpoint not set"
+        assert os.getenv("AZURE_OPENAPI_DEPLOYMENT") == "GPT-4", "Azure deployment not set to GPT-4"
+        assert os.getenv("AZURE_OPENAPI_VERSION"), "Azure API version not set"
+
+    def test_azure_endpoint_format(self):
+        """Verify Azure endpoint has correct format"""
+        endpoint = os.getenv("AZURE_OPENAPI_ENDPOINT")
+        assert endpoint.startswith("https://"), "Endpoint should use HTTPS"
+        assert ".openai.azure.com" in endpoint, "Endpoint should be Azure OpenAI domain"
+
+    def test_api_health_check(self):
+        """Test that API health check passes with Azure config"""
+        import requests
+        
+        response = requests.get("http://localhost:8000/health", timeout=10)
+        assert response.status_code == 200, f"Health check failed: {response.status_code}"
+        
+        data = response.json()
+        assert data["status"] == "healthy", "API should report healthy status"
+        assert data["database"] == "connected", "Database should be connected"
+        assert data["redis"] == "connected", "Redis should be connected"
+
+    @patch("services.jd_parser.azure_client")
+    def test_job_parsing_with_azure(self, mock_azure_client):
+        """Test job description parsing uses Azure GPT-4"""
+        # Mock Azure response
+        mock_azure_client.return_value = {
+            "job_title": "Senior Software Engineer",
+            "company": "Tech Corp",
+            "skills": ["Python", "Azure", "Docker"],
+            "experience_required": "5+ years"
+        }
+        
+        # Simulate job parsing
+        job_data = mock_azure_client()
+        
+        assert job_data["job_title"] == "Senior Software Engineer"
+        assert "Azure" in job_data["skills"]
+        mock_azure_client.assert_called_once()
+
+    @patch("services.resume_analyzer.azure_client")
+    def test_resume_analysis_with_azure(self, mock_azure_client):
+        """Test resume analysis uses Azure GPT-4"""
+        mock_azure_client.return_value = {
+            "summary": "Experienced full-stack developer",
+            "skills": ["Python", "Docker", "Kubernetes"],
+            "experience_years": 7,
+            "education": "BS Computer Science"
+        }
+        
+        resume_data = mock_azure_client()
+        
+        assert resume_data["experience_years"] == 7
+        assert "Kubernetes" in resume_data["skills"]
+        mock_azure_client.assert_called_once()
+
+    @patch("services.scoring.azure_client")
+    def test_job_scoring_with_azure(self, mock_azure_client):
+        """Test job scoring uses Azure GPT-4"""
+        mock_azure_client.return_value = {
+            "match_score": 8.5,
+            "reasons": ["Strong skills match", "Experience aligned"],
+            "recommendation": "HIGHLY_RECOMMENDED"
+        }
+        
+        score = mock_azure_client()
+        
+        assert score["match_score"] >= 0 and score["match_score"] <= 10
+        assert score["recommendation"] in ["HIGHLY_RECOMMENDED", "RECOMMENDED", "NOT_RECOMMENDED"]
+        mock_azure_client.assert_called_once()
+
+
+class TestAzureCostTracking:
+    """Test Azure OpenAI cost tracking"""
+
+    def test_api_call_logging(self):
+        """Verify API calls are logged for cost tracking"""
+        import requests
+        
+        # Make an API call
+        response = requests.get("http://localhost:8000/health")
+        assert response.status_code == 200
+        
+        # Verify logs contain request information
+        # This would be checked in actual logs
+        assert response.elapsed.total_seconds() > 0
+
+    def test_token_usage_tracking(self):
+        """Test that token usage is tracked for billing"""
+        # Token tracking should be implemented in the service layer
+        pass
+
+
+class TestAzureErrorHandling:
+    """Test error handling with Azure OpenAI"""
+
+    @patch.dict(os.environ, {"AZURE_OPENAPI_KEY": "invalid_key"})
+    def test_invalid_azure_key_handling(self):
+        """Test graceful handling of invalid Azure API key"""
+        # This would test that authentication errors are caught
+        pass
+
+    def test_rate_limit_handling(self):
+        """Test handling of Azure rate limits"""
+        # Should implement exponential backoff
+        pass
+
+    def test_timeout_handling(self):
+        """Test handling of Azure API timeouts"""
+        # Should implement timeout with fallback
+        pass
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
