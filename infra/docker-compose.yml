@@ -6,7 +6,7 @@ services:
     container_name: jobforge-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobforge_password}
       POSTGRES_DB: ${POSTGRES_DB:-jobforge_ai}
     ports:
       - "5432:5432"
@@ -17,20 +17,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:latest
     container_name: jobforge-redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   web:
     build:
@@ -40,12 +42,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-jobforge_ai}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-jobforge_password}@postgres:5432/${POSTGRES_DB:-jobforge_ai}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/2
+      - ENV=production
+      - DEBUG=false
+      - LOG_LEVEL=INFO
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,6 +60,7 @@ services:
       - ../storage:/app/storage
     env_file:
       - ../.env
+    restart: unless-stopped
 
   worker:
     build:
@@ -62,12 +68,12 @@ services:
       dockerfile: infra/docker/Dockerfile.worker
     container_name: jobforge-worker
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-jobforge_ai}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-jobforge_password}@postgres:5432/${POSTGRES_DB:-jobforge_ai}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/2
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +84,7 @@ services:
     env_file:
       - ../.env
     command: celery -A apps.worker.celery_app worker --loglevel=info --concurrency=4
+    restart: unless-stopped
 
 volumes:
   postgres_data:

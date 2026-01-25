@@ -2,6 +2,28 @@
 
 from celery import Celery
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Redis cache BEFORE importing tasks
+from packages.common.redis_cache import init_redis_cache
+
+redis_host = os.getenv("REDIS_HOST", "localhost")
+redis_port = int(os.getenv("REDIS_PORT", "6379"))
+redis_db = int(os.getenv("REDIS_DB", "0"))
+redis_password = os.getenv("REDIS_PASSWORD")
+
+try:
+    init_redis_cache(
+        host=redis_host,
+        port=redis_port,
+        db=redis_db,
+        password=redis_password
+    )
+except Exception as e:
+    print(f"Warning: Failed to initialize Redis cache: {e}")
 
 # Get Redis URL from environment
 broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")

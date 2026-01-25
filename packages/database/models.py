@@ -228,7 +228,7 @@ class Artifact(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
     artifact_type = Column(String(50), nullable=False, index=True)  # resume, answers, pitch
     path = Column(String(500), nullable=False)
-    metadata = Column(JSONB)  # bullet IDs, keyword coverage, etc.
+    artifact_metadata = Column(JSONB)  # bullet IDs, keyword coverage, etc.
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     
     __table_args__ = (
