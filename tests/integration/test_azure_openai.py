@@ -3,11 +3,11 @@ Integration tests for Azure OpenAI integration.
 Tests job parsing, analysis, and scoring with Azure GPT-4.
 """
 
-
 import os
 import pytest
 from unittest.mock import patch, MagicMock
 from dotenv import load_dotenv
+
 load_dotenv()
 
 
@@ -30,10 +30,10 @@ class TestAzureOpenAIIntegration:
     def test_api_health_check(self):
         """Test that API health check passes with Azure config"""
         import requests
-        
+
         response = requests.get("http://localhost:8000/health", timeout=10)
         assert response.status_code == 200, f"Health check failed: {response.status_code}"
-        
+
         data = response.json()
         assert data["status"] == "healthy", "API should report healthy status"
         assert data["database"] == "connected", "Database should be connected"
@@ -48,7 +48,7 @@ class TestAzureOpenAIIntegration:
             "job_title": "Senior Software Engineer",
             "company": "Tech Corp",
             "skills": ["Python", "Azure", "Docker"],
-            "experience_required": "5+ years"
+            "experience_required": "5+ years",
         }
         # Simulate job parsing
         job_data = instance.parse("Some job description")
@@ -64,7 +64,7 @@ class TestAzureOpenAIIntegration:
             "summary": "Experienced full-stack developer",
             "skills": ["Python", "Docker", "Kubernetes"],
             "experience_years": 7,
-            "education": "BS Computer Science"
+            "education": "BS Computer Science",
         }
         resume_data = instance.analyze_resume("Some resume text")
         assert resume_data["experience_years"] == 7
@@ -78,7 +78,7 @@ class TestAzureOpenAIIntegration:
         instance.score_job.return_value = {
             "match_score": 8.5,
             "reasons": ["Strong skills match", "Experience aligned"],
-            "recommendation": "HIGHLY_RECOMMENDED"
+            "recommendation": "HIGHLY_RECOMMENDED",
         }
         score = instance.score_job("job_id", "user_id", {}, {}, {})
         assert score["match_score"] >= 0 and score["match_score"] <= 10
@@ -92,11 +92,11 @@ class TestAzureCostTracking:
     def test_api_call_logging(self):
         """Verify API calls are logged for cost tracking"""
         import requests
-        
+
         # Make an API call
         response = requests.get("http://localhost:8000/health")
         assert response.status_code == 200
-        
+
         # Verify logs contain request information
         # This would be checked in actual logs
         assert response.elapsed.total_seconds() > 0

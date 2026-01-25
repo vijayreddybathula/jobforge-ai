@@ -25,9 +25,9 @@ Base = declarative_base()
 
 class User(Base):
     """User model."""
-    
+
     __tablename__ = "users"
-    
+
     user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
@@ -35,7 +35,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
     resumes = relationship("Resume", back_populates="user")
     user_profiles = relationship("UserProfile", back_populates="user")
@@ -45,9 +45,9 @@ class User(Base):
 
 class Resume(Base):
     """Resume model."""
-    
+
     __tablename__ = "resumes"
-    
+
     resume_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
     version = Column(Integer, default=1)  # Version number for this user's resumes
@@ -57,7 +57,7 @@ class Resume(Base):
     content_hash = Column(String(64), unique=True, index=True)
     parsed_data = Column(JSONB)  # Structured parsed resume data
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     user = relationship("User", back_populates="resumes")
     role_matches = relationship("RoleMatch", back_populates="resume")
@@ -65,44 +65,50 @@ class Resume(Base):
 
 class RoleMatch(Base):
     """Role match model."""
-    
+
     __tablename__ = "role_matches"
-    
+
     role_match_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    resume_id = Column(UUID(as_uuid=True), ForeignKey("resumes.resume_id"), nullable=False, index=True)
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.resume_id"), nullable=False, index=True
+    )
     role_title = Column(String(255), nullable=False)
     confidence_score = Column(Integer)  # 0-100
     is_confirmed = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     resume = relationship("Resume", back_populates="role_matches")
 
 
 class UserProfile(Base):
     """User profile model."""
-    
+
     __tablename__ = "user_profiles"
-    
+
     profile_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True
+    )
     core_roles = Column(JSONB)  # List of role titles
     skills = Column(JSONB)  # Nested structure: languages, frameworks, etc.
     approved_bullets = Column(JSONB)  # List of approved resume bullets
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
     user = relationship("User", back_populates="user_profiles")
 
 
 class UserPreferences(Base):
     """User preferences model."""
-    
+
     __tablename__ = "user_preferences"
-    
+
     preferences_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True
+    )
     visa_status = Column(String(100))
     location_preferences = Column(JSONB)  # remote/hybrid/onsite, cities
     disability_status = Column(String(100))
@@ -116,16 +122,16 @@ class UserPreferences(Base):
     is_ready = Column(Boolean, default=False)  # Profile ready for job ingestion
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
     user = relationship("User", back_populates="user_preferences")
 
 
 class IngestionSource(Base):
     """Ingestion source configuration."""
-    
+
     __tablename__ = "ingestion_sources"
-    
+
     source_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
     source_type = Column(String(50), nullable=False)  # linkedin, workday, glassdoor, company_portal
@@ -133,19 +139,19 @@ class IngestionSource(Base):
     is_active = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
-    __table_args__ = (
-        Index("idx_source_user_type", "user_id", "source_type"),
-    )
+
+    __table_args__ = (Index("idx_source_user_type", "user_id", "source_type"),)
 
 
 class ScrapingSession(Base):
     """Scraping session tracking."""
-    
+
     __tablename__ = "scraping_sessions"
-    
+
     session_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    source_id = Column(UUID(as_uuid=True), ForeignKey("ingestion_sources.source_id"), nullable=False, index=True)
+    source_id = Column(
+        UUID(as_uuid=True), ForeignKey("ingestion_sources.source_id"), nullable=False, index=True
+    )
     jobs_found = Column(Integer, default=0)
     jobs_ingested = Column(Integer, default=0)
     jobs_duplicates = Column(Integer, default=0)
@@ -158,9 +164,9 @@ class ScrapingSession(Base):
 
 class JobRaw(Base):
     """Raw job posting model."""
-    
+
     __tablename__ = "jobs_raw"
-    
+
     job_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     source = Column(String(50), nullable=False, index=True)  # linkedin, workday, etc.
     source_url = Column(String(1000), unique=True, nullable=False, index=True)
@@ -171,9 +177,11 @@ class JobRaw(Base):
     html_snapshot_path = Column(String(500))
     text_content = Column(Text)
     content_hash = Column(String(64), unique=True, index=True)
-    ingest_status = Column(String(50), default="INGESTED", index=True)  # INGESTED, DUPLICATE, FAILED
+    ingest_status = Column(
+        String(50), default="INGESTED", index=True
+    )  # INGESTED, DUPLICATE, FAILED
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     parsed = relationship("JobParsed", back_populates="job", uselist=False)
     scores = relationship("JobScore", back_populates="job")
@@ -182,48 +190,50 @@ class JobRaw(Base):
 
 class JobParsed(Base):
     """Parsed job description model."""
-    
+
     __tablename__ = "jobs_parsed"
-    
+
     parsed_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, unique=True, index=True)
+    job_id = Column(
+        UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, unique=True, index=True
+    )
     parsed_json = Column(JSONB, nullable=False)
     parser_version = Column(String(50))
     parse_status = Column(String(50), default="PARSED", index=True)  # PARSED, PARSE_FAILED
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     job = relationship("JobRaw", back_populates="parsed")
 
 
 class JobScore(Base):
     """Job score model."""
-    
+
     __tablename__ = "job_scores"
-    
+
     score_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
     total_score = Column(Integer, nullable=False, index=True)  # 0-100
     breakdown = Column(JSONB)  # Score breakdown by category
-    verdict = Column(String(50), nullable=False, index=True)  # SKIP, VALIDATE, ASSISTED_APPLY, ELIGIBLE_AUTO_SUBMIT
+    verdict = Column(
+        String(50), nullable=False, index=True
+    )  # SKIP, VALIDATE, ASSISTED_APPLY, ELIGIBLE_AUTO_SUBMIT
     rationale = Column(Text)
     scoring_version = Column(String(50))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     job = relationship("JobRaw", back_populates="scores")
-    
-    __table_args__ = (
-        Index("idx_job_user_score", "job_id", "user_id", "total_score"),
-    )
+
+    __table_args__ = (Index("idx_job_user_score", "job_id", "user_id", "total_score"),)
 
 
 class Artifact(Base):
     """Generated artifact model."""
-    
+
     __tablename__ = "artifacts"
-    
+
     artifact_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
@@ -231,17 +241,15 @@ class Artifact(Base):
     path = Column(String(500), nullable=False)
     artifact_metadata = Column(JSONB)  # bullet IDs, keyword coverage, etc.
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
-    __table_args__ = (
-        Index("idx_artifact_job_type", "job_id", "artifact_type"),
-    )
+
+    __table_args__ = (Index("idx_artifact_job_type", "job_id", "artifact_type"),)
 
 
 class Application(Base):
     """Application tracking model."""
-    
+
     __tablename__ = "applications"
-    
+
     application_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
@@ -250,7 +258,7 @@ class Application(Base):
     submitted_at = Column(DateTime(timezone=True))
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    
+
     # Relationships
     job = relationship("JobRaw", back_populates="applications")
     user = relationship("User", back_populates="applications")
@@ -259,15 +267,17 @@ class Application(Base):
 
 class Outcome(Base):
     """Application outcome model."""
-    
+
     __tablename__ = "outcomes"
-    
+
     outcome_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    application_id = Column(UUID(as_uuid=True), ForeignKey("applications.application_id"), nullable=False, index=True)
+    application_id = Column(
+        UUID(as_uuid=True), ForeignKey("applications.application_id"), nullable=False, index=True
+    )
     stage = Column(String(50), nullable=False, index=True)  # rejected, phone_screen, onsite, offer
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     source = Column(String(50))  # email, manual
     details = Column(JSONB)
-    
+
     # Relationships
     application = relationship("Application", back_populates="outcomes")

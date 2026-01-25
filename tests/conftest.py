@@ -1,9 +1,32 @@
 """Pytest configuration and fixtures."""
 
 import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock, MagicMock, patch
 from packages.database.connection import init_database, get_db
-from packages.common.redis_cache import init_redis_cache
+from packages.common import redis_cache
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_redis():
+    """Initialize Redis cache for testing."""
+    # Create a mock Redis connection
+    mock_client = Mock()
+    mock_client.ping.return_value = True
+    mock_client.get.return_value = None
+    mock_client.set.return_value = True
+    mock_client.delete.return_value = True
+    mock_client.exists.return_value = False
+    mock_client.increment.return_value = 1
+    mock_client.sismember.return_value = False
+    mock_client.sadd.return_value = 1
+
+    # Create a mock RedisCache instance
+    with patch("redis.Redis") as mock_redis_class:
+        mock_redis_class.return_value = mock_client
+        # Initialize the global cache with mocked connection
+        redis_cache.init_redis_cache()
+
+    yield
 
 
 @pytest.fixture

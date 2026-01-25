@@ -14,17 +14,17 @@ logger = get_logger(__name__)
 
 class JDParser:
     """Parse job descriptions using LLM."""
-    
+
     def __init__(self):
         """Initialize JD parser."""
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
-        
+
         self.client = OpenAI(api_key=api_key)
         self.cache = JDParseCache()
         self.model = "gpt-4"  # Use GPT-4 for structured output
-    
+
     def _create_prompt(self, jd_text: str) -> str:
         """Create prompt for JD parsing."""
         return f"""Parse the following job description and extract structured information.
@@ -54,48 +54,51 @@ Return only valid JSON, no additional text."""
 
     def parse(self, jd_text: str) -> ParsedJD:
         """Parse job description.
-        
+
         Args:
             jd_text: Job description text
-        
+
         Returns:
             Parsed JD object
         """
         # Generate content hash for caching
         content_hash = hashlib.sha256(jd_text.encode()).hexdigest()
-        
+
         # Check cache first
         cached = self.cache.get(jd_text)
         if cached:
             logger.info(f"JD parse cache hit (hash: {content_hash[:8]}...)")
             return ParsedJD(**cached)
-        
+
         # Call LLM
         try:
             prompt = self._create_prompt(jd_text)
-            
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert at parsing job descriptions. Always return valid JSON matching the exact schema."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "You are an expert at parsing job descriptions. Always return valid JSON matching the exact schema.",
+                    },
+                    {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.3
+                temperature=0.3,
             )
-            
+
             result_text = response.choices[0].message.content
             result = json.loads(result_text)
-            
+
             # Validate with Pydantic
             parsed_jd = ParsedJD(**result)
-            
+
             # Cache result
             self.cache.set(jd_text, parsed_jd.dict())
-            
+
             logger.info(f"JD parsed successfully (hash: {content_hash[:8]}...)")
             return parsed_jd
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
             logger.error(f"Response was: {result_text[:500]}")
@@ -104,11 +107,11 @@ Return only valid JSON, no additional text."""
         except Exception as e:
             logger.error(f"JD parsing failed: {e}")
             raise
-    
+
     def _repair_parse(self, jd_text: str, invalid_json: str, error: Exception) -> ParsedJD:
         """Attempt to repair invalid JSON parse."""
         logger.warning("Attempting to repair invalid JSON parse")
-        
+
         try:
             # Try to fix common JSON issues
             repair_prompt = f"""The following JSON parsing failed with error: {str(error)}
@@ -133,23 +136,26 @@ Please fix the JSON and return only valid JSON matching this schema:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a JSON repair expert. Fix the JSON and return only valid JSON."},
-                    {"role": "user", "content": repair_prompt}
+                    {
+                        "role": "system",
+                        "content": "You are a JSON repair expert. Fix the JSON and return only valid JSON.",
+                    },
+                    {"role": "user", "content": repair_prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.1
+                temperature=0.1,
             )
-            
+
             result_text = response.choices[0].message.content
             result = json.loads(result_text)
             parsed_jd = ParsedJD(**result)
-            
+
             # Cache repaired result
             self.cache.set(jd_text, parsed_jd.dict())
-            
+
             logger.info("JD parse repaired successfully")
             return parsed_jd
-            
+
         except Exception as repair_error:
             logger.error(f"Repair attempt failed: {repair_error}")
             # Return fallback with minimal data
@@ -157,5 +163,5 @@ Please fix the JSON and return only valid JSON matching this schema:
                 role="Unknown",
                 seniority="Unknown",
                 employment_type="Unknown",
-                location_type="Unknown"
+                location_type="Unknown",
             )

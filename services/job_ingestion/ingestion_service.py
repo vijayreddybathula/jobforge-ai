@@ -17,13 +17,13 @@ logger = get_logger(__name__)
 
 class IngestionService:
     """Service for ingesting jobs from various sources."""
-    
+
     def __init__(self):
         """Initialize ingestion service."""
         self.normalizer = JobNormalizer()
         self.rate_limiter = RateLimiter()
         self.cache = get_redis_cache()
-    
+
     def ingest_job(
         self,
         source: str,
@@ -34,10 +34,10 @@ class IngestionService:
         description: str,
         html_content: Optional[str] = None,
         posted_at: Optional[datetime] = None,
-        db: Optional[Session] = None
+        db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """Ingest a single job posting.
-        
+
         Args:
             source: Source type (linkedin, workday, etc.)
             source_url: URL of the job posting
@@ -48,48 +48,35 @@ class IngestionService:
             html_content: Optional HTML content
             posted_at: Optional posting date
             db: Database session
-        
+
         Returns:
             Dictionary with job_id and ingest_status
         """
         if db is None:
             db = next(get_db())
-        
+
         try:
             # Normalize and deduplicate
             normalized = self.normalizer.normalize(
-                title=title,
-                company=company,
-                location=location,
-                description=description
+                title=title, company=company, location=location, description=description
             )
-            
+
             content_hash = normalized["content_hash"]
-            
+
             # Check if already exists (using Redis set for fast lookup)
             seen_key = f"jobs:seen:{content_hash}"
             if self.cache.is_in_set(seen_key, content_hash):
                 logger.debug(f"Job already seen: {content_hash[:8]}...")
-                return {
-                    "job_id": None,
-                    "ingest_status": "DUPLICATE",
-                    "dedupe": True
-                }
-            
+                return {"job_id": None, "ingest_status": "DUPLICATE", "dedupe": True}
+
             # Check database for existing job
-            existing = db.query(JobRaw).filter(
-                JobRaw.content_hash == content_hash
-            ).first()
-            
+            existing = db.query(JobRaw).filter(JobRaw.content_hash == content_hash).first()
+
             if existing:
                 # Add to Redis set
                 self.cache.add_to_set(seen_key, content_hash)
-                return {
-                    "job_id": existing.job_id,
-                    "ingest_status": "DUPLICATE",
-                    "dedupe": True
-                }
-            
+                return {"job_id": existing.job_id, "ingest_status": "DUPLICATE", "dedupe": True}
+
             # Create new job record
             job = JobRaw(
                 source=source,
@@ -100,69 +87,53 @@ class IngestionService:
                 text_content=normalized["description"],
                 content_hash=content_hash,
                 posted_at=posted_at,
-                ingest_status="INGESTED"
+                ingest_status="INGESTED",
             )
-            
+
             # Save HTML snapshot if provided
             if html_content:
                 from pathlib import Path
+
                 storage_path = Path("./storage/jobs")
                 storage_path.mkdir(parents=True, exist_ok=True)
                 snapshot_path = storage_path / f"{content_hash}.html"
                 snapshot_path.write_text(html_content, encoding="utf-8")
                 job.html_snapshot_path = str(snapshot_path)
-            
+
             db.add(job)
             db.commit()
             db.refresh(job)
-            
+
             # Add to Redis set
             self.cache.add_to_set(seen_key, content_hash)
-            
+
             logger.info(f"Job ingested: {job.job_id} from {source}")
-            
-            return {
-                "job_id": job.job_id,
-                "ingest_status": "INGESTED",
-                "dedupe": False
-            }
-            
+
+            return {"job_id": job.job_id, "ingest_status": "INGESTED", "dedupe": False}
+
         except Exception as e:
             logger.error(f"Job ingestion failed: {e}")
             db.rollback()
-            return {
-                "job_id": None,
-                "ingest_status": "FAILED",
-                "error": str(e)
-            }
-    
+            return {"job_id": None, "ingest_status": "FAILED", "error": str(e)}
+
     def ingest_batch(
-        self,
-        jobs: List[Dict[str, Any]],
-        source: str,
-        db: Optional[Session] = None
+        self, jobs: List[Dict[str, Any]], source: str, db: Optional[Session] = None
     ) -> Dict[str, Any]:
         """Ingest multiple jobs.
-        
+
         Args:
             jobs: List of job dictionaries
             source: Source type
             db: Database session
-        
+
         Returns:
             Summary of ingestion results
         """
         if db is None:
             db = next(get_db())
-        
-        results = {
-            "total": len(jobs),
-            "ingested": 0,
-            "duplicates": 0,
-            "failed": 0,
-            "job_ids": []
-        }
-        
+
+        results = {"total": len(jobs), "ingested": 0, "duplicates": 0, "failed": 0, "job_ids": []}
+
         for job_data in jobs:
             result = self.ingest_job(
                 source=source,
@@ -173,9 +144,9 @@ class IngestionService:
                 description=job_data.get("description", ""),
                 html_content=job_data.get("html_content"),
                 posted_at=job_data.get("posted_at"),
-                db=db
+                db=db,
             )
-            
+
             if result["ingest_status"] == "INGESTED":
                 results["ingested"] += 1
                 results["job_ids"].append(result["job_id"])
@@ -183,10 +154,10 @@ class IngestionService:
                 results["duplicates"] += 1
             else:
                 results["failed"] += 1
-        
+
         logger.info(
             f"Batch ingestion completed: {results['ingested']} ingested, "
             f"{results['duplicates']} duplicates, {results['failed']} failed"
         )
-        
+
         return results

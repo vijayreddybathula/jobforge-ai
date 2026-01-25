@@ -7,6 +7,7 @@ from uuid import UUID
 
 class LocationPreferences(BaseModel):
     """Location preferences model."""
+
     remote_only: bool = False
     hybrid_ok: bool = True
     onsite_ok: bool = False
@@ -15,6 +16,7 @@ class LocationPreferences(BaseModel):
 
 class UserPreferencesCreate(BaseModel):
     """Schema for creating user preferences."""
+
     visa_status: Optional[str] = None
     location_preferences: Optional[LocationPreferences] = None
     disability_status: Optional[str] = None
@@ -29,6 +31,7 @@ class UserPreferencesCreate(BaseModel):
 
 class UserPreferencesUpdate(BaseModel):
     """Schema for updating user preferences."""
+
     visa_status: Optional[str] = None
     location_preferences: Optional[LocationPreferences] = None
     disability_status: Optional[str] = None
@@ -44,6 +47,7 @@ class UserPreferencesUpdate(BaseModel):
 
 class UserPreferencesResponse(BaseModel):
     """Response schema for user preferences."""
+
     preferences_id: UUID
     user_id: UUID
     visa_status: Optional[str] = None

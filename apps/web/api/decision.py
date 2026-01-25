@@ -18,32 +18,24 @@ decision_service = DecisionService()
 
 @router.get("/{job_id}/decision")
 async def get_decision(
-    job_id: UUID,
-    user_id: UUID,  # TODO: Get from authenticated user
-    db: Session = Depends(get_db)
+    job_id: UUID, user_id: UUID, db: Session = Depends(get_db)  # TODO: Get from authenticated user
 ):
     """Get decision for job."""
     # Get score
-    score = db.query(JobScore).filter(
-        JobScore.job_id == job_id,
-        JobScore.user_id == user_id
-    ).first()
-    
+    score = (
+        db.query(JobScore).filter(JobScore.job_id == job_id, JobScore.user_id == user_id).first()
+    )
+
     if not score:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Score not found. Call POST /score first."
+            status_code=status.HTTP_404_NOT_FOUND, detail="Score not found. Call POST /score first."
         )
-    
+
     # Make decision
     decision = decision_service.make_decision(
-        job_id=job_id,
-        user_id=user_id,
-        score=score.total_score,
-        verdict=score.verdict,
-        db=db
+        job_id=job_id, user_id=user_id, score=score.total_score, verdict=score.verdict, db=db
     )
-    
+
     return decision
 
 
@@ -52,7 +44,7 @@ async def override_decision(
     job_id: UUID,
     user_id: UUID,  # TODO: Get from authenticated user
     new_decision: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     """Manually override decision."""
     # Validate decision
@@ -60,28 +52,24 @@ async def override_decision(
     if new_decision not in valid_decisions:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid decision. Must be one of: {valid_decisions}"
+            detail=f"Invalid decision. Must be one of: {valid_decisions}",
         )
-    
+
     # Update score verdict
-    score = db.query(JobScore).filter(
-        JobScore.job_id == job_id,
-        JobScore.user_id == user_id
-    ).first()
-    
+    score = (
+        db.query(JobScore).filter(JobScore.job_id == job_id, JobScore.user_id == user_id).first()
+    )
+
     if not score:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Score not found"
-        )
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Score not found")
+
     score.verdict = new_decision
     db.commit()
-    
+
     logger.info(f"Decision overridden: {job_id} -> {new_decision}")
-    
+
     return {
         "job_id": job_id,
         "decision": new_decision,
-        "message": "Decision overridden successfully"
+        "message": "Decision overridden successfully",
     }
