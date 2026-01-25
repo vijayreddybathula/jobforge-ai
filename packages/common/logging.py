@@ -25,7 +25,7 @@ class JSONFormatter(logging.Formatter):
 
         # Add correlation ID if present
         if hasattr(record, "correlation_id"):
-            log_data["correlation_id"] = record.correlation_id
+            log_data["correlation_id"] = getattr(record, "correlation_id")
 
         # Add exception info if present
         if record.exc_info:
@@ -33,7 +33,7 @@ class JSONFormatter(logging.Formatter):
 
         # Add extra fields
         if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+            log_data.update(getattr(record, "extra_fields"))  # type: ignore
 
         return json.dumps(log_data)
 
