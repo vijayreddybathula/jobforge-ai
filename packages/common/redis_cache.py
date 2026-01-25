@@ -175,7 +175,6 @@ redis_cache: Optional[RedisCache] = None
 
 def get_redis_cache() -> RedisCache:
     """Get global Redis cache instance."""
-    global redis_cache
     if redis_cache is None:
         raise RuntimeError("Redis cache not initialized. Call init_redis_cache() first.")
     return redis_cache

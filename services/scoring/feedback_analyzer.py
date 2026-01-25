@@ -1,6 +1,6 @@
 """Feedback analyzer for improving scoring."""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from packages.database.models import JobScore, Outcome, Application
 from packages.database.connection import get_db

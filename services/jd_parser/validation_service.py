@@ -1,6 +1,6 @@
 """JD parsing validation service."""
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from packages.schemas.jd_schema import ParsedJD
 from packages.common.logging import get_logger
 
