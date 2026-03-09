@@ -1,196 +1,118 @@
-"""User preferences API endpoints."""
+"""User preferences API — user_id from auth."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from typing import Optional, List
 from uuid import UUID
 
 from packages.database.connection import get_db
-from packages.database.models import UserPreferences, User
-from packages.schemas.user_preferences import (
-    UserPreferencesCreate,
-    UserPreferencesUpdate,
-    UserPreferencesResponse,
-)
-from packages.common.redis_cache import get_redis_cache
-from packages.common.logging import get_logger
+from packages.database.models import UserPreferences
 from apps.web.auth import get_current_user
+from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
-
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
 
-def _get_cache_key(user_id: UUID) -> str:
-    """Get Redis cache key for user preferences."""
-    return f"user:prefs:{user_id}"
+class PreferencesBody(BaseModel):
+    visa_status: Optional[str] = None
+    work_authorization: Optional[str] = None
+    location_preferences: Optional[dict] = None   # {remote, hybrid, onsite, cities}
+    salary_min_usd: Optional[int] = None
+    salary_max_usd: Optional[int] = None
+    company_size_preferences: Optional[List[str]] = None
+    industry_preferences: Optional[List[str]] = None
+    disability_status: Optional[str] = None
+    disability_accommodations: Optional[str] = None
+    other_constraints: Optional[dict] = None
 
 
-@router.get("", response_model=UserPreferencesResponse)
-async def get_preferences(
-    user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Get user preferences (with Redis cache)."""
-    cache = get_redis_cache()
-    cache_key = _get_cache_key(user_id)
-
-    # Try cache first
-    cached = cache.get(cache_key)
-    if cached:
-        logger.debug(f"Preferences cache hit for user {user_id}")
-        return UserPreferencesResponse(**cached)
-
-    # Get from database
-    preferences = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
-
-    if not preferences:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found. Please create preferences first.",
-        )
-
-    # Convert to response
-    response_data = {
-        "preferences_id": preferences.preferences_id,
-        "user_id": preferences.user_id,
-        "visa_status": preferences.visa_status,
-        "location_preferences": preferences.location_preferences,
-        "disability_status": preferences.disability_status,
-        "disability_accommodations": preferences.disability_accommodations,
-        "salary_min_usd": preferences.salary_min_usd,
-        "salary_max_usd": preferences.salary_max_usd,
-        "company_size_preferences": preferences.company_size_preferences,
-        "industry_preferences": preferences.industry_preferences,
-        "work_authorization": preferences.work_authorization,
-        "other_constraints": preferences.other_constraints,
-        "is_ready": preferences.is_ready,
-        "created_at": preferences.created_at.isoformat(),
-        "updated_at": preferences.updated_at.isoformat(),
+def _serialize(p: UserPreferences) -> dict:
+    return {
+        "preferences_id": str(p.preferences_id),
+        "user_id": str(p.user_id),
+        "visa_status": p.visa_status,
+        "work_authorization": p.work_authorization,
+        "location_preferences": p.location_preferences,
+        "salary_min_usd": p.salary_min_usd,
+        "salary_max_usd": p.salary_max_usd,
+        "company_size_preferences": p.company_size_preferences,
+        "industry_preferences": p.industry_preferences,
+        "disability_status": p.disability_status,
+        "is_ready": p.is_ready,
+        "created_at": p.created_at.isoformat(),
+        "updated_at": p.updated_at.isoformat(),
     }
 
-    # Cache response (1 hour TTL)
-    cache.set(cache_key, response_data, ttl=3600)
 
-    return UserPreferencesResponse(**response_data)
-
-
-@router.post("", response_model=UserPreferencesResponse)
-async def create_preferences(
-    preferences: UserPreferencesCreate,
-    user_id: UUID = Depends(get_current_user),
+@router.get("/")
+async def get_preferences(
+    current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Create user preferences."""
-    # Check if user exists
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    """Get preferences for the authenticated user only."""
+    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == current_user_id).first()
+    if not prefs:
+        raise HTTPException(status_code=404, detail="Preferences not set yet. Call POST /preferences.")
+    return _serialize(prefs)
 
-    # Check if preferences already exist
-    existing = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
 
+@router.post("/", status_code=201)
+async def create_preferences(
+    body: PreferencesBody,
+    current_user_id: UUID = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create preferences for the authenticated user. One record per user."""
+    existing = db.query(UserPreferences).filter(UserPreferences.user_id == current_user_id).first()
     if existing:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Preferences already exist. Use PUT to update.",
+            status_code=409,
+            detail="Preferences already exist. Use PUT /preferences to update.",
         )
 
-    # Create preferences
-    db_preferences = UserPreferences(
-        user_id=user_id,
-        visa_status=preferences.visa_status,
-        location_preferences=(
-            preferences.location_preferences.dict() if preferences.location_preferences else None
-        ),
-        disability_status=preferences.disability_status,
-        disability_accommodations=preferences.disability_accommodations,
-        salary_min_usd=preferences.salary_min_usd,
-        salary_max_usd=preferences.salary_max_usd,
-        company_size_preferences=preferences.company_size_preferences,
-        industry_preferences=preferences.industry_preferences,
-        work_authorization=preferences.work_authorization,
-        other_constraints=preferences.other_constraints,
-        is_ready=False,
+    prefs = UserPreferences(
+        user_id=current_user_id,
+        **body.dict(exclude_none=True),
+        is_ready=True,
     )
-
-    db.add(db_preferences)
+    db.add(prefs)
     db.commit()
-    db.refresh(db_preferences)
-
-    # Invalidate cache
-    cache = get_redis_cache()
-    cache.delete(_get_cache_key(user_id))
-
-    logger.info(f"Preferences created for user {user_id}")
-
-    return UserPreferencesResponse(
-        preferences_id=db_preferences.preferences_id,
-        user_id=db_preferences.user_id,
-        visa_status=db_preferences.visa_status,
-        location_preferences=db_preferences.location_preferences,
-        disability_status=db_preferences.disability_status,
-        disability_accommodations=db_preferences.disability_accommodations,
-        salary_min_usd=db_preferences.salary_min_usd,
-        salary_max_usd=db_preferences.salary_max_usd,
-        company_size_preferences=db_preferences.company_size_preferences,
-        industry_preferences=db_preferences.industry_preferences,
-        work_authorization=db_preferences.work_authorization,
-        other_constraints=db_preferences.other_constraints,
-        is_ready=db_preferences.is_ready,
-        created_at=db_preferences.created_at.isoformat(),
-        updated_at=db_preferences.updated_at.isoformat(),
-    )
+    db.refresh(prefs)
+    logger.info(f"Preferences created for user {current_user_id}")
+    return _serialize(prefs)
 
 
-@router.put("", response_model=UserPreferencesResponse)
+@router.put("/")
 async def update_preferences(
-    preferences: UserPreferencesUpdate,
-    user_id: UUID = Depends(get_current_user),
+    body: PreferencesBody,
+    current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update user preferences."""
-    # Get existing preferences
-    db_preferences = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+    """Update preferences for the authenticated user."""
+    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == current_user_id).first()
+    if not prefs:
+        raise HTTPException(status_code=404, detail="Preferences not found. Call POST first.")
 
-    if not db_preferences:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Preferences not found. Use POST to create.",
-        )
-
-    # Update fields
-    update_data = preferences.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        if field == "location_preferences" and value is not None:
-            if hasattr(value, "dict"):
-                value = value.dict()
-            setattr(db_preferences, field, value)
-        else:
-            setattr(db_preferences, field, value)
-
+    for field, value in body.dict(exclude_none=True).items():
+        setattr(prefs, field, value)
+    prefs.is_ready = True
     db.commit()
-    db.refresh(db_preferences)
+    db.refresh(prefs)
+    logger.info(f"Preferences updated for user {current_user_id}")
+    return _serialize(prefs)
 
-    # Invalidate cache
-    cache = get_redis_cache()
-    cache.delete(_get_cache_key(user_id))
 
-    logger.info(f"Preferences updated for user {user_id}")
-
-    return UserPreferencesResponse(
-        preferences_id=db_preferences.preferences_id,
-        user_id=db_preferences.user_id,
-        visa_status=db_preferences.visa_status,
-        location_preferences=db_preferences.location_preferences,
-        disability_status=db_preferences.disability_status,
-        disability_accommodations=db_preferences.disability_accommodations,
-        salary_min_usd=db_preferences.salary_min_usd,
-        salary_max_usd=db_preferences.salary_max_usd,
-        company_size_preferences=db_preferences.company_size_preferences,
-        industry_preferences=db_preferences.industry_preferences,
-        work_authorization=db_preferences.work_authorization,
-        other_constraints=db_preferences.other_constraints,
-        is_ready=db_preferences.is_ready,
-        created_at=db_preferences.created_at.isoformat(),
-        updated_at=db_preferences.updated_at.isoformat(),
-    )
+@router.delete("/")
+async def delete_preferences(
+    current_user_id: UUID = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete preferences for the authenticated user."""
+    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == current_user_id).first()
+    if not prefs:
+        raise HTTPException(status_code=404, detail="Preferences not found.")
+    db.delete(prefs)
+    db.commit()
+    return {"message": "Preferences deleted."}

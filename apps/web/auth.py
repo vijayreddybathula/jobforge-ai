@@ -1,41 +1,58 @@
-"""Authentication utilities for API endpoints."""
+"""Authentication dependency for FastAPI.
 
-from fastapi import Depends, HTTPException, status, Header
+Simple model: email + password → user_id stored in localStorage on frontend.
+All authenticated endpoints use Depends(get_current_user) instead of
+accepting user_id as a query param (which is forgeable).
+
+The X-User-ID header is validated against the DB on every request.
+No JWT needed at this stage — the UUID itself is the session token,
+validated server-side against is_active on every call.
+"""
+
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.orm import Session
 from uuid import UUID
-from typing import Optional
+
+from packages.database.connection import get_db
+from packages.database.models import User
+from packages.common.logging import get_logger
+
+logger = get_logger(__name__)
 
 
-async def get_current_user(
-    x_user_id: Optional[str] = Header(None),
+def get_current_user(
+    x_user_id: str = Header(..., description="User UUID from login session"),
+    db: Session = Depends(get_db),
 ) -> UUID:
     """
-    Extract user_id from X-User-ID header.
+    Validate the X-User-ID header against the database.
 
-    In a production environment, this would validate JWT tokens or similar.
-    For now, we expect the client to send X-User-ID header with the UUID.
+    Returns the user's UUID if valid and active.
+    Raises 401 if missing, malformed, not found, or inactive.
 
-    Args:
-        x_user_id: User ID from X-User-ID header
-
-    Returns:
-        UUID: The user ID
-
-    Raises:
-        HTTPException: If user_id is not provided or invalid
+    This replaces all `user_id: UUID` query params across the API.
+    After login, the frontend stores user_id in localStorage and sends
+    it as a header on every request. The server validates it here.
     """
-    if not x_user_id:
+    try:
+        user_uuid = UUID(x_user_id)
+    except (ValueError, AttributeError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing X-User-ID header. Please provide your user ID.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid user ID format in X-User-ID header",
         )
 
-    try:
-        user_id = UUID(x_user_id)
-        return user_id
-    except ValueError:
+    user = (
+        db.query(User)
+        .filter(User.user_id == user_uuid, User.is_active == True)  # noqa: E712
+        .first()
+    )
+
+    if not user:
+        logger.warning(f"Auth failed: user_id={x_user_id} not found or inactive")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid X-User-ID header. Must be a valid UUID.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="User not found or account inactive. Please log in again.",
         )
+
+    return user.user_id
