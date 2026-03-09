@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List, Dict, Any, Optional
+from typing import Optional
 from uuid import UUID
 
 from packages.database.connection import get_db
@@ -18,84 +18,113 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 ingestion_service = IngestionService()
-jd_parser = JDParser()
-fallback_parser = FallbackParser()
+jd_parser         = JDParser()
+fallback_parser   = FallbackParser()
 
+
+def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobScore]) -> dict:
+    """Build the standard job dict enriched with parsed data and user score."""
+    return {
+        "job_id":       str(job.job_id),
+        "title":        job.title,
+        "company":      job.company,
+        "location":     job.location,
+        "source":       job.source,
+        "source_url":   str(job.source_url) if job.source_url else None,
+        "created_at":   job.created_at.isoformat(),
+        # parsed fields
+        "parse_status": parsed.parse_status if parsed else "NOT_PARSED",
+        "parsed_role":  parsed.parsed_json.get("role") if parsed and parsed.parsed_json else None,
+        # user-specific score (None when not scored yet)
+        "score":        score.total_score if score else None,
+        "verdict":      score.verdict     if score else "NOT_SCORED",
+        "breakdown":    score.breakdown   if score else None,
+        "rationale":    score.rationale   if score else None,
+    }
+
+
+# ── List ────────────────────────────────────────────────────────────────────────
 
 @router.get("/", summary="List all jobs with current user's score status")
 async def list_jobs(
-    page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1, le=100),
-    verdict: Optional[str] = Query(None),
-    parsed_only: bool = Query(False),
-    current_user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    page:        int           = Query(1,  ge=1),
+    limit:       int           = Query(20, ge=1, le=100),
+    verdict:     Optional[str] = Query(None),
+    parsed_only: bool          = Query(False),
+    current_user_id: UUID      = Depends(get_current_user),
+    db: Session                = Depends(get_db),
 ):
     query = db.query(JobRaw)
     if parsed_only:
         parsed_ids = {
-            p.job_id
-            for p in db.query(JobParsed.job_id)
-            .filter(JobParsed.parse_status == "PARSED")
-            .all()
+            p.job_id for p in
+            db.query(JobParsed.job_id).filter(JobParsed.parse_status == "PARSED").all()
         }
         query = query.filter(JobRaw.job_id.in_(parsed_ids))
 
     total = query.count()
     jobs  = query.order_by(JobRaw.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
 
-    job_ids = [j.job_id for j in jobs]
-    scores  = {
-        str(s.job_id): s
-        for s in db.query(JobScore)
-        .filter(JobScore.user_id == current_user_id, JobScore.job_id.in_(job_ids))
-        .all()
+    job_ids    = [j.job_id for j in jobs]
+    scores     = {
+        str(s.job_id): s for s in
+        db.query(JobScore).filter(JobScore.user_id == current_user_id, JobScore.job_id.in_(job_ids)).all()
     }
     parsed_map = {
-        str(p.job_id): p
-        for p in db.query(JobParsed).filter(JobParsed.job_id.in_(job_ids)).all()
+        str(p.job_id): p for p in
+        db.query(JobParsed).filter(JobParsed.job_id.in_(job_ids)).all()
     }
 
     result = []
     for job in jobs:
-        jid    = str(job.job_id)
-        score  = scores.get(jid)
-        parsed = parsed_map.get(jid)
-
-        item = {
-            "job_id":       jid,
-            "title":        job.title,
-            "company":      job.company,
-            "location":     job.location,
-            "source":       job.source,
-            "source_url":   str(job.source_url),
-            "created_at":   job.created_at.isoformat(),
-            "parse_status": parsed.parse_status if parsed else "NOT_PARSED",
-            "parsed_role":  parsed.parsed_json.get("role") if parsed and parsed.parsed_json else None,
-            "score":        score.total_score if score else None,
-            "verdict":      score.verdict if score else "NOT_SCORED",
-            "breakdown":    score.breakdown if score else None,
-            "rationale":    score.rationale if score else None,
-        }
-
+        jid  = str(job.job_id)
+        item = _enrich_job(job, parsed_map.get(jid), scores.get(jid))
         if verdict and item["verdict"] != verdict:
             continue
         result.append(item)
 
-    return {"jobs": result, "total": total, "page": page, "limit": limit, "pages": (total + limit - 1) // limit}
+    return {"jobs": result, "total": total, "page": page, "limit": limit,
+            "pages": (total + limit - 1) // limit}
 
+
+# ── Single job detail ───────────────────────────────────────────────────────────
+
+@router.get("/{job_id}", summary="Get a single job enriched with this user's score")
+async def get_job(
+    job_id: UUID,
+    current_user_id: UUID = Depends(get_current_user),
+    db: Session           = Depends(get_db),
+):
+    """
+    Returns full job detail including source_url, parse status, and
+    the calling user's score/verdict.  Used by the job detail page.
+    """
+    job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
+    score  = (
+        db.query(JobScore)
+        .filter(JobScore.job_id == job_id, JobScore.user_id == current_user_id)
+        .first()
+    )
+    return _enrich_job(job, parsed, score)
+
+
+# ── Search & ingest ─────────────────────────────────────────────────────────────
 
 @router.post("/search", summary="Search and ingest jobs via JSearch API")
 async def search_and_ingest_jobs(
-    keywords: str = Query(...),
-    location: str = Query("United States"),
-    work_type: Optional[str] = Query(None),
-    date_posted: Optional[str] = Query(None),
-    max_results: int = Query(20, ge=1, le=50),
-    auto_parse: bool = Query(True),
-    force_reparse: bool = Query(False),
-    current_user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    keywords:     str           = Query(...),
+    location:     str           = Query("United States"),
+    work_type:    Optional[str] = Query(None),
+    date_posted:  Optional[str] = Query(None),
+    max_results:  int           = Query(20, ge=1, le=50),
+    auto_parse:   bool          = Query(True),
+    force_reparse: bool         = Query(False),
+    current_user_id: UUID       = Depends(get_current_user),
+    db: Session                 = Depends(get_db),
 ):
     try:
         jsearch = JSearchSource()
@@ -138,13 +167,10 @@ async def search_and_ingest_jobs(
                 if existing and force_reparse:
                     db.delete(existing); db.commit()
                 try:
-                    parsed_jd      = jd_parser.parse(job.text_content)
-                    parser_version = "jd-parser-v1"
+                    pjd = jd_parser.parse(job.text_content);     ver = "jd-parser-v1"
                 except Exception:
-                    parsed_jd      = fallback_parser.parse(job.text_content)
-                    parser_version = "fallback-parser-v1"
-                db.add(JobParsed(job_id=job_id, parsed_json=parsed_jd.dict(),
-                                 parser_version=parser_version, parse_status="PARSED"))
+                    pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
+                db.add(JobParsed(job_id=job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
                 db.commit()
                 parse_results["reparsed" if existing else "parsed"] += 1
             except Exception as e:
@@ -163,94 +189,72 @@ async def search_and_ingest_jobs(
     }
 
 
-@router.post("/parse-all", summary="Parse all unparse jobs in the catalog")
+# ── Bulk parse ──────────────────────────────────────────────────────────────────
+
+@router.post("/parse-all", summary="Parse all unparsed jobs in the catalog")
 async def parse_all_jobs(
-    force_reparse: bool = Query(False),
+    force_reparse: bool   = Query(False),
     current_user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session           = Depends(get_db),
 ):
-    """
-    Parse every job in jobs_raw that either has no jobs_parsed row yet,
-    or (if force_reparse=true) every job regardless.
-    Returns counts of parsed / skipped / failed.
-    """
     all_jobs = db.query(JobRaw).all()
     already_parsed = {
-        str(p.job_id)
-        for p in db.query(JobParsed).filter(JobParsed.parse_status == "PARSED").all()
+        str(p.job_id) for p in
+        db.query(JobParsed).filter(JobParsed.parse_status == "PARSED").all()
     }
-
     results = {"parsed": 0, "skipped": 0, "failed": 0}
-
     for job in all_jobs:
         jid = str(job.job_id)
-        if jid in already_parsed and not force_reparse:
-            results["skipped"] += 1
-            continue
-        if not job.text_content:
-            results["skipped"] += 1
-            continue
+        if (jid in already_parsed and not force_reparse) or not job.text_content:
+            results["skipped"] += 1; continue
         try:
             existing = db.query(JobParsed).filter(JobParsed.job_id == job.job_id).first()
-            if existing:
-                db.delete(existing); db.commit()
-            try:
-                parsed_jd      = jd_parser.parse(job.text_content)
-                parser_version = "jd-parser-v1"
-            except Exception:
-                parsed_jd      = fallback_parser.parse(job.text_content)
-                parser_version = "fallback-parser-v1"
-            db.add(JobParsed(job_id=job.job_id, parsed_json=parsed_jd.dict(),
-                             parser_version=parser_version, parse_status="PARSED"))
-            db.commit()
-            results["parsed"] += 1
+            if existing: db.delete(existing); db.commit()
+            try:   pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
+            except: pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
+            db.add(JobParsed(job_id=job.job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
+            db.commit(); results["parsed"] += 1
         except Exception as e:
-            logger.error(f"parse-all failed for {job.job_id}: {e}")
-            results["failed"] += 1
-
+            logger.error(f"parse-all failed for {job.job_id}: {e}"); results["failed"] += 1
     return {"message": "Bulk parse complete", **results}
 
+
+# ── Single job parse ────────────────────────────────────────────────────────────
 
 @router.post("/{job_id}/parse")
 async def parse_job(
     job_id: UUID,
-    force_reparse: bool = Query(False),
+    force_reparse: bool   = Query(False),
     current_user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session           = Depends(get_db),
 ):
     job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-
     existing = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
     if existing and not force_reparse:
         return {"job_id": str(job_id), "parse_status": existing.parse_status, "parsed_jd": existing.parsed_json}
     if existing and force_reparse:
         db.delete(existing); db.commit()
-
     if not job.text_content:
         raise HTTPException(status_code=422, detail="Job has no text content to parse.")
-
     try:
-        try:
-            parsed_jd      = jd_parser.parse(job.text_content)
-            parser_version = "jd-parser-v1"
-        except Exception:
-            parsed_jd      = fallback_parser.parse(job.text_content)
-            parser_version = "fallback-parser-v1"
-        db.add(JobParsed(job_id=job_id, parsed_json=parsed_jd.dict(),
-                         parser_version=parser_version, parse_status="PARSED"))
+        try:   pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
+        except: pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
+        db.add(JobParsed(job_id=job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
         db.commit()
-        return {"job_id": str(job_id), "parse_status": "PARSED", "parsed_jd": parsed_jd.dict()}
+        return {"job_id": str(job_id), "parse_status": "PARSED", "parsed_jd": pjd.dict()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Get parsed JD ───────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}/parsed")
 async def get_parsed_job(
     job_id: UUID,
     current_user_id: UUID = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session           = Depends(get_db),
 ):
     parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
     if not parsed:

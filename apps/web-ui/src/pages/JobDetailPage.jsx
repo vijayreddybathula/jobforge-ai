@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useApi } from '../hooks/useApi'
-import { ArrowLeft, Zap, Sparkles, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Zap, Sparkles, ExternalLink, AlertCircle } from 'lucide-react'
 import VerdictBadge from '../components/jobs/VerdictBadge'
 import ScoreCircle from '../components/jobs/ScoreCircle'
 import Spinner from '../components/common/Spinner'
@@ -18,11 +18,10 @@ const BREAKDOWN_LABELS = {
 
 function SkillChips({ skills, variant = 'default' }) {
   if (!skills?.length) return null
-  const cls = variant === 'brand'
-    ? 'bg-brand/10 border-brand/20 text-brand-muted'
-    : variant === 'soft'
-      ? 'bg-emerald-900/20 border-emerald-500/20 text-emerald-300'
-      : 'bg-surface border-surface-border text-slate-300'
+  const cls =
+    variant === 'brand' ? 'bg-brand/10 border-brand/20 text-brand-muted'
+    : variant === 'soft'  ? 'bg-emerald-900/20 border-emerald-500/20 text-emerald-300'
+    : 'bg-surface border-surface-border text-slate-300'
   return (
     <div className="flex flex-wrap gap-1.5">
       {skills.map(s => (
@@ -33,17 +32,18 @@ function SkillChips({ skills, variant = 'default' }) {
 }
 
 export default function JobDetailPage() {
-  const { id }     = useParams()
-  const api        = useApi()
-  const navigate   = useNavigate()
-  const didLoad    = useRef(false)
+  const { id }   = useParams()
+  const api      = useApi()
+  const navigate = useNavigate()
+  const didLoad  = useRef(false)
 
-  const [job,     setJob]     = useState(null)
-  const [parsed,  setParsed]  = useState(null)
-  const [score,   setScore]   = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [scoring, setScoring] = useState(false)
-  const [toast,   setToast]   = useState(null)
+  const [job,      setJob]      = useState(null)
+  const [parsed,   setParsed]   = useState(null)
+  const [score,    setScore]    = useState(null)
+  const [loading,  setLoading]  = useState(true)
+  const [scoring,  setScoring]  = useState(false)
+  const [apiError, setApiError] = useState('')
+  const [toast,    setToast]    = useState(null)
 
   useEffect(() => {
     if (didLoad.current) return
@@ -51,18 +51,17 @@ export default function JobDetailPage() {
 
     const load = async () => {
       try {
-        // Fetch the specific job directly — don't scan the whole list
-        const [jobsData, parsedData, scoreData] = await Promise.all([
-          api.get(`/jobs/?page=1&limit=100`),
+        // Single direct lookup — no more scanning through a paginated list
+        const [jobData, parsedData, scoreData] = await Promise.all([
+          api.get(`/jobs/${id}`),
           api.get(`/jobs/${id}/parsed`).catch(() => null),
           api.get(`/jobs/${id}/score`).catch(() => null),
         ])
-        const found = jobsData.jobs?.find(j => j.job_id === id) || null
-        setJob(found)
+        setJob(jobData)
         setParsed(parsedData?.parsed_jd ?? null)
         setScore(scoreData ?? null)
       } catch (e) {
-        setToast({ message: e.message, type: 'error' })
+        setApiError(e.message)
       } finally {
         setLoading(false)
       }
@@ -76,27 +75,59 @@ export default function JobDetailPage() {
       const s = await api.post(`/jobs/${id}/score`)
       setScore(s)
       setJob(j => j ? { ...j, score: s.total_score, verdict: s.verdict } : j)
+      // If this was NOT_SCORED, also refresh the parsed JD (auto-parse may have run)
+      if (!parsed) {
+        const p = await api.get(`/jobs/${id}/parsed`).catch(() => null)
+        setParsed(p?.parsed_jd ?? null)
+      }
       setToast({ message: `Scored: ${s.total_score}/100 — ${s.verdict}` })
     } catch (e) {
       setToast({ message: e.message, type: 'error' })
     } finally { setScoring(false) }
   }
 
-  if (loading) return <div className="flex justify-center py-20"><Spinner size="lg" /></div>
-  if (!job)    return <div className="text-slate-400 p-4">Job not found.</div>
+  /* ── Loading / error states ──────────────────────────────────── */
+  if (loading) return (
+    <div className="flex justify-center py-20"><Spinner size="lg" /></div>
+  )
+
+  if (apiError) return (
+    <div className="max-w-2xl">
+      <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-6">
+        <ArrowLeft size={15} /> Back to Jobs
+      </Link>
+      <div className="card flex items-start gap-3">
+        <AlertCircle size={18} className="text-red-400 shrink-0 mt-0.5" />
+        <div>
+          <p className="text-slate-200 font-medium">Failed to load job</p>
+          <p className="text-slate-400 text-sm mt-1">{apiError}</p>
+        </div>
+      </div>
+    </div>
+  )
+
+  if (!job) return (
+    <div className="max-w-2xl">
+      <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-6">
+        <ArrowLeft size={15} /> Back to Jobs
+      </Link>
+      <div className="card text-slate-400 text-sm">Job not found.</div>
+    </div>
+  )
 
   const scoreData      = score || job
   const breakdown      = scoreData?.breakdown || {}
   const cleanBreakdown = Object.entries(breakdown).filter(([k]) => !k.startsWith('_'))
   const verdict        = scoreData?.verdict || job.verdict
 
+  /* ── Render ──────────────────────────────────────────────── */
   return (
     <div className="max-w-5xl space-y-6">
       <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200">
         <ArrowLeft size={15} /> Back to Jobs
       </Link>
 
-      {/* ── Header card ─────────────────────────────────────────────── */}
+      {/* Header */}
       <div className="card">
         <div className="flex items-start gap-4">
           <ScoreCircle score={scoreData?.total_score ?? scoreData?.score} size="lg" />
@@ -107,8 +138,6 @@ export default function JobDetailPage() {
             <p className="text-slate-400 mt-1 text-sm">
               {job.company} · {job.location} · {job.source}
             </p>
-
-            {/* Source URL */}
             {job.source_url && job.source_url !== 'null' && (
               <a
                 href={job.source_url}
@@ -119,7 +148,6 @@ export default function JobDetailPage() {
                 View original posting <ExternalLink size={11} />
               </a>
             )}
-
             <div className="flex items-center gap-2 mt-3">
               <VerdictBadge verdict={verdict} />
             </div>
@@ -141,7 +169,7 @@ export default function JobDetailPage() {
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
-        {/* ── Score breakdown ───────────────────────────────────────── */}
+        {/* Score breakdown */}
         {cleanBreakdown.length > 0 && (
           <div className="card">
             <h2 className="font-semibold text-slate-200 mb-4">Score Breakdown</h2>
@@ -167,19 +195,16 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* ── Parsed JD ─────────────────────────────────────────────── */}
-        {parsed && (
+        {/* Parsed JD */}
+        {parsed ? (
           <div className="card space-y-4">
             <h2 className="font-semibold text-slate-200">Parsed Job Description</h2>
             <div className="space-y-3 text-sm">
-
-              {/* Role + Seniority */}
               <div className="grid grid-cols-2 gap-2">
                 <div><span className="text-slate-500">Role </span><span className="text-slate-200 font-medium">{parsed.role}</span></div>
                 <div><span className="text-slate-500">Seniority </span><span className="text-slate-200 font-medium">{parsed.seniority}</span></div>
               </div>
 
-              {/* Salary */}
               {(parsed.salary_min || parsed.salary_max || parsed.salary_range) && (
                 <div>
                   <span className="text-slate-500">Salary </span>
@@ -191,31 +216,24 @@ export default function JobDetailPage() {
                 </div>
               )}
 
-              {/* Must-haves */}
               {parsed.must_have_skills?.length > 0 && (
                 <div>
                   <p className="text-slate-500 mb-1.5">Must-haves</p>
                   <SkillChips skills={parsed.must_have_skills} />
                 </div>
               )}
-
-              {/* Nice-to-haves */}
               {parsed.nice_to_have_skills?.length > 0 && (
                 <div>
                   <p className="text-slate-500 mb-1.5">Nice-to-haves</p>
                   <SkillChips skills={parsed.nice_to_have_skills} variant="soft" />
                 </div>
               )}
-
-              {/* ATS Keywords */}
               {parsed.ats_keywords?.length > 0 && (
                 <div>
                   <p className="text-slate-500 mb-1.5">ATS Keywords</p>
                   <SkillChips skills={parsed.ats_keywords} variant="brand" />
                 </div>
               )}
-
-              {/* Responsibilities */}
               {parsed.responsibilities?.length > 0 && (
                 <div>
                   <p className="text-slate-500 mb-1.5">Responsibilities</p>
@@ -226,8 +244,6 @@ export default function JobDetailPage() {
                   </ul>
                 </div>
               )}
-
-              {/* Summary / description */}
               {parsed.summary && (
                 <div>
                   <p className="text-slate-500 mb-1">Summary</p>
@@ -235,6 +251,14 @@ export default function JobDetailPage() {
                 </div>
               )}
             </div>
+          </div>
+        ) : (
+          /* Not yet parsed — show a prompt to score which auto-parses */
+          <div className="card flex flex-col items-center justify-center py-10 text-center">
+            <p className="text-slate-400 text-sm mb-3">This job hasn't been parsed yet.</p>
+            <button onClick={handleScore} disabled={scoring} className="btn-primary flex items-center gap-2">
+              {scoring ? <><Spinner size="sm" /> Parsing & Scoring…</> : <><Zap size={15} /> Score to Parse</>}
+            </button>
           </div>
         )}
       </div>
