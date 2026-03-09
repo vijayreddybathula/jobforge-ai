@@ -17,15 +17,15 @@ const BREAKDOWN_LABELS = {
 }
 
 function SkillChips({ skills, variant = 'default' }) {
-  if (!skills?.length) return null
+  if (!Array.isArray(skills) || skills.length === 0) return null
   const cls =
     variant === 'brand' ? 'bg-brand/10 border-brand/20 text-brand-muted'
     : variant === 'soft'  ? 'bg-emerald-900/20 border-emerald-500/20 text-emerald-300'
     : 'bg-surface border-surface-border text-slate-300'
   return (
     <div className="flex flex-wrap gap-1.5">
-      {skills.map(s => (
-        <span key={s} className={`border px-2 py-0.5 rounded text-xs ${cls}`}>{s}</span>
+      {skills.map((s, i) => (
+        <span key={`${s}-${i}`} className={`border px-2 py-0.5 rounded text-xs ${cls}`}>{s}</span>
       ))}
     </div>
   )
@@ -60,7 +60,7 @@ export default function JobDetailPage() {
         setParsed(parsedData?.parsed_jd ?? null)
         setScore(scoreData ?? null)
       } catch (e) {
-        setApiError(e.message)
+        setApiError(e?.message || 'Failed to load job')
       } finally {
         setLoading(false)
       }
@@ -80,15 +80,18 @@ export default function JobDetailPage() {
       }
       setToast({ message: `Scored: ${s.total_score}/100 — ${s.verdict}` })
     } catch (e) {
-      setToast({ message: e.message, type: 'error' })
-    } finally { setScoring(false) }
+      setToast({ message: e?.message || 'Scoring failed', type: 'error' })
+    } finally {
+      setScoring(false)
+    }
   }
 
-  /* ── Loading / error states ──────────────────────────────────── */
+  /* ── Loading ──────────────────────────────────────────────── */
   if (loading) return (
     <div className="flex justify-center py-20"><Spinner size="lg" /></div>
   )
 
+  /* ── Error from API ───────────────────────────────────────── */
   if (apiError) return (
     <div className="max-w-2xl">
       <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-6">
@@ -104,6 +107,7 @@ export default function JobDetailPage() {
     </div>
   )
 
+  /* ── Job not found ────────────────────────────────────────── */
   if (!job) return (
     <div className="max-w-2xl">
       <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200 mb-6">
@@ -113,32 +117,30 @@ export default function JobDetailPage() {
     </div>
   )
 
-  // score object (from POST /score) takes precedence; fall back to what
-  // came embedded in the job row from GET /jobs/{id}
+  /* ── Derive display values safely ─────────────────────────── */
   const totalScore     = score?.total_score ?? job.score ?? null
   const verdict        = score?.verdict     ?? job.verdict ?? 'NOT_SCORED'
-  // Guard against null — Object.entries(null) throws a TypeError → blank screen
-  const breakdown      = (score?.breakdown != null ? score.breakdown : job.breakdown) ?? {}
+  const breakdown      = score?.breakdown   ?? job.breakdown ?? {}
+  const rationale      = score?.rationale   ?? job.rationale ?? null
   const cleanBreakdown = Object.entries(breakdown).filter(([k]) => !k.startsWith('_'))
-  const rationale      = score?.rationale ?? job.rationale ?? null
 
-  /* ── Render ──────────────────────────────────────────────── */
+  /* ── Render ───────────────────────────────────────────────── */
   return (
     <div className="max-w-5xl space-y-6">
       <Link to="/jobs" className="inline-flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-200">
         <ArrowLeft size={15} /> Back to Jobs
       </Link>
 
-      {/* Header */}
+      {/* Header card */}
       <div className="card">
         <div className="flex items-start gap-4">
           <ScoreCircle score={totalScore} size="lg" />
           <div className="flex-1 min-w-0">
             <h1 className="text-xl font-bold text-slate-100 leading-tight">
-              {parsed?.role || job.parsed_role || job.title}
+              {parsed?.role || job.parsed_role || job.title || 'Unknown Role'}
             </h1>
             <p className="text-slate-400 mt-1 text-sm">
-              {job.company} · {job.location} · {job.source}
+              {[job.company, job.location, job.source].filter(Boolean).join(' · ')}
             </p>
             {job.source_url && job.source_url !== 'null' && (
               <a
@@ -171,7 +173,7 @@ export default function JobDetailPage() {
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
-        {/* Score breakdown — only rendered after scoring */}
+        {/* Score breakdown */}
         {cleanBreakdown.length > 0 && (
           <div className="card">
             <h2 className="font-semibold text-slate-200 mb-4">Score Breakdown</h2>
@@ -184,7 +186,7 @@ export default function JobDetailPage() {
                   </div>
                   <div className="h-1.5 bg-surface rounded-full overflow-hidden">
                     <div className="h-full rounded-full transition-all" style={{
-                      width: `${v}%`,
+                      width: `${Math.min(100, Math.max(0, v))}%`,
                       background: v >= 80 ? '#6366f1' : v >= 60 ? '#10b981' : v >= 40 ? '#f59e0b' : '#ef4444',
                     }} />
                   </div>
@@ -203,15 +205,22 @@ export default function JobDetailPage() {
             <h2 className="font-semibold text-slate-200">Parsed Job Description</h2>
             <div className="space-y-3 text-sm">
               <div className="grid grid-cols-2 gap-2">
-                <div><span className="text-slate-500">Role </span><span className="text-slate-200 font-medium">{parsed.role}</span></div>
-                <div><span className="text-slate-500">Seniority </span><span className="text-slate-200 font-medium">{parsed.seniority}</span></div>
+                {parsed.role && (
+                  <div><span className="text-slate-500">Role </span>
+                    <span className="text-slate-200 font-medium">{parsed.role}</span></div>
+                )}
+                {parsed.seniority && (
+                  <div><span className="text-slate-500">Seniority </span>
+                    <span className="text-slate-200 font-medium">{parsed.seniority}</span></div>
+                )}
               </div>
 
               {(parsed.salary_range?.min || parsed.salary_range?.max) && (
                 <div>
                   <span className="text-slate-500">Salary </span>
                   <span className="text-slate-200 font-medium">
-                    ${(parsed.salary_range.min || 0).toLocaleString()} – ${(parsed.salary_range.max || 0).toLocaleString()}
+                    ${(parsed.salary_range.min || 0).toLocaleString()}
+                    {parsed.salary_range.max ? ` – $${parsed.salary_range.max.toLocaleString()}` : '+'}
                   </span>
                 </div>
               )}
@@ -253,22 +262,13 @@ export default function JobDetailPage() {
             </div>
           </div>
         ) : (
-          /* Not yet parsed */
           <div className="card flex flex-col items-center justify-center py-10 text-center">
-            <p className="text-slate-400 text-sm mb-3">This job hasn't been parsed yet.</p>
+            <p className="text-slate-400 text-sm mb-3">This job hasn't been scored yet.</p>
+            <p className="text-slate-500 text-xs mb-4">Scoring will auto-parse the job description.</p>
             <button onClick={handleScore} disabled={scoring} className="btn-primary flex items-center gap-2">
-              {scoring ? <><Spinner size="sm" /> Parsing & Scoring…</> : <><Zap size={15} /> Score to Parse</>}
-            </button>
-          </div>
-        )}
-
-        {/* Unscored prompt — shown when job is parsed but not yet scored */}
-        {parsed && totalScore === null && (
-          <div className="card flex flex-col items-center justify-center py-10 text-center">
-            <p className="text-slate-400 text-sm mb-1">Job parsed but not yet scored.</p>
-            <p className="text-slate-500 text-xs mb-4">Hit Score to see how well this matches your profile.</p>
-            <button onClick={handleScore} disabled={scoring} className="btn-secondary flex items-center gap-2">
-              {scoring ? <><Spinner size="sm" /> Scoring…</> : <><Zap size={15} /> Score Now</>}
+              {scoring
+                ? <><Spinner size="sm" /> Parsing & Scoring…</>
+                : <><Zap size={15} /> Score to Parse</>}
             </button>
           </div>
         )}
