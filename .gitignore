@@ -69,3 +69,8 @@ Thumbs.db
 # Project specific
 .cursor/
 plans/
+
+# Node / Frontend
+node_modules/
+apps/web-ui/dist/
+apps/web-ui/.vite/

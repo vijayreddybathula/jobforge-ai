@@ -1,153 +1,160 @@
-# JobForge AI - Intelligent Job Application Agent
+# JobForge AI
 
-An intelligent job application agent that helps you find, score, and apply to the right jobs with human-in-the-loop safety.
+> Career infra tool: score-first, apply-second, human-in-the-loop safety.
 
-## Features
+---
 
-- **Resume Analysis**: Upload and analyze your resume to identify role matches
-- **Smart Job Ingestion**: Pull jobs from LinkedIn, Workday, Glassdoor, and company portals
-- **Intelligent Scoring**: Multi-factor scoring (0-100) with explainable breakdowns
-- **Artifact Generation**: Generate tailored resumes, recruiter pitches, and screening answers
-- **Assisted Apply**: Browser automation that stops before final submit (human gate)
-- **Outcome Tracking**: Track application outcomes and improve scoring over time
+## Stack
 
-## Architecture
+| Layer | Tech |
+|---|---|
+| API | FastAPI (Python 3.11+) |
+| DB | PostgreSQL + pgvector |
+| Cache | Redis |
+| LLM | Azure OpenAI (GPT-4.1) |
+| Storage | Azure Blob Storage |
+| Frontend | React 18 + Vite + TailwindCSS |
+| Dependency mgmt | Poetry (Python) · npm (Node) |
 
-- **Backend**: FastAPI (Python 3.11+)
-- **Frontend**: React + TypeScript (Next.js)
-- **Database**: PostgreSQL with pgvector
-- **Cache & Queue**: Redis
-- **LLM**: OpenAI API (GPT-4 for parsing, GPT-3.5 for scoring)
+---
 
-## Quick Start
+## Setup
 
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 16+ with pgvector extension
-- Redis 7+
-- Node.js 18+ (for frontend)
-- OpenAI API key
+- [Poetry](https://python-poetry.org/docs/#installation)
+- Node.js 20+ (use `.nvmrc`: `nvm use` in `apps/web-ui/`)
+- Docker (for PostgreSQL + Redis)
+- Azure OpenAI + Blob Storage credentials
 
-### Setup
+### 1. Clone and install all dependencies
 
-1. **Clone and install dependencies**:
 ```bash
-pip install -e .
+git clone https://github.com/vijayreddybathula/jobforge-ai
+cd jobforge-ai
+
+# Install everything (Python + Node)
+make install
+
+# Or separately:
+poetry install          # Python deps (includes bcrypt, fastapi, sqlalchemy, etc.)
+cd apps/web-ui && npm install   # Frontend deps
 ```
 
-2. **Configure environment**:
+### 2. Environment variables
+
+Copy `.env.example` and fill in your credentials:
+
 ```bash
 cp .env.example .env
-# Edit .env with your configuration
 ```
 
-3. **Start services with Docker Compose**:
-```bash
-cd infra
-docker-compose up -d
-```
-
-4. **Run database migrations**:
-```bash
-alembic -c packages/database/alembic.ini upgrade head
-```
-
-5. **Start the API**:
-```bash
-cd apps/web
-uvicorn main:app --reload
-```
-
-6. **Start Celery worker** (in separate terminal):
-```bash
-cd apps/worker
-celery -A celery_app worker --loglevel=info
-```
-
-7. **Start frontend** (in separate terminal):
-```bash
-cd apps/web/frontend
-npm install
-npm run dev
-```
-
-## API Endpoints
-
-### Resume
-- `POST /api/v1/resume/upload` - Upload resume
-- `POST /api/v1/resume/analyze/{resume_id}` - Analyze resume
-- `GET /api/v1/resume/roles/{resume_id}` - Get suggested roles
-
-### Preferences
-- `GET /api/v1/preferences` - Get user preferences
-- `POST /api/v1/preferences` - Create preferences
-- `PUT /api/v1/preferences` - Update preferences
-
-### Jobs
-- `POST /api/v1/jobs/ingest` - Ingest a job
-- `POST /api/v1/jobs/ingest/linkedin` - Scrape from LinkedIn
-- `POST /api/v1/jobs/{job_id}/parse` - Parse job description
-- `POST /api/v1/jobs/{job_id}/score` - Score job fit
-- `GET /api/v1/jobs/{job_id}/decision` - Get decision
-
-### Artifacts
-- `POST /api/v1/jobs/{job_id}/artifacts/generate` - Generate artifacts
-- `GET /api/v1/jobs/{job_id}/artifacts` - List artifacts
-
-### Apply
-- `POST /api/v1/jobs/{job_id}/apply/assisted/start` - Start assisted apply
-- `POST /api/v1/jobs/{job_id}/apply/submit` - Submit application
-
-## Project Structure
+Required variables:
 
 ```
-jobforge-ai/
-├── apps/
-│   ├── web/              # FastAPI backend + React frontend
-│   └── worker/           # Celery worker for background tasks
-├── services/
-│   ├── resume_analyzer/  # Resume parsing & role extraction
-│   ├── job_ingestion/    # Multi-source job scraping
-│   ├── jd_parser/        # JD parsing agent
-│   ├── scoring/          # Fit scoring service
-│   ├── decision_engine/  # Apply/validate/skip logic
-│   ├── artifacts/        # Resume tailoring & generation
-│   └── apply_bot/        # Browser automation
-├── packages/
-│   ├── schemas/          # Pydantic models
-│   ├── database/         # SQLAlchemy models & migrations
-│   └── common/           # Shared utilities (Redis, logging)
-└── config/               # Configuration files
+AZURE_BLOB_CONNECTION_STRING=...
+AZURE_OPENAPI_KEY=...
+AZURE_OPENAPI_ENDPOINT=...
+AZURE_OPENAPI_DEPLOYMENT=gpt-4.1
+AZURE_OPENAPI_VERSION=2024-06-01-preview
+JSEARCH_API_KEY=...
+JSEARCH_API_HOST=jsearch.p.rapidapi.com
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/jobforge_ai
+REDIS_URL=redis://localhost:6379
 ```
 
-## Risk Mitigation
-
-See [docs/risk_mitigation_strategy.md](docs/risk_mitigation_strategy.md) for comprehensive risk mitigation strategies.
-
-Key mitigations:
-- **Redis caching** for LLM responses (60%+ cost reduction)
-- **Rate limiting** for all scraping operations
-- **Human-in-the-loop** for all application submissions
-- **Schema validation** with repair logic and fallback parsers
-- **Comprehensive error handling** and graceful degradation
-
-## Development
-
-### Running Tests
+### 3. Start infrastructure
 
 ```bash
-pytest tests/
+docker-compose up -d   # starts PostgreSQL + Redis
 ```
 
-### Code Quality
+### 4. Run database migrations
 
 ```bash
-black .
-ruff check .
-mypy .
+poetry run alembic upgrade head
 ```
 
-## License
+### 5. Start the API
 
-MIT
+```bash
+make dev-api
+# FastAPI running at http://localhost:8000
+# Swagger docs at http://localhost:8000/docs
+```
+
+### 6. Start the frontend
+
+```bash
+make dev-ui
+# Vite running at http://localhost:5173
+# Proxies /api/* to http://localhost:8000
+```
+
+---
+
+## Python dependencies
+
+All managed by **Poetry** via `pyproject.toml`. No `pip install` needed.
+
+Key packages:
+- `bcrypt >=4.0.0` — password hashing for login
+- `passlib[bcrypt] >=1.7.4` — password utilities
+- `fastapi` — API framework
+- `sqlalchemy` — ORM
+- `azure-storage-blob` — resume file storage
+- `openai` — Azure OpenAI client
+
+To add a new Python package:
+```bash
+poetry add <package-name>
+```
+
+---
+
+## Node dependencies
+
+All managed by **npm** via `apps/web-ui/package.json`.
+
+Key packages:
+- `react` + `react-dom` — UI framework
+- `react-router-dom` — SPA routing
+- `tailwindcss` — styling
+- `lucide-react` — icons
+- `react-dropzone` — file upload UX
+
+To add a new frontend package:
+```bash
+cd apps/web-ui && npm install <package-name>
+```
+
+---
+
+## Architecture
+
+See [`docs/DATA_ISOLATION.md`](docs/DATA_ISOLATION.md) for the full multi-user security model.
+
+See [`docs/FRONTEND_UX_ARCHITECTURE.md`](docs/FRONTEND_UX_ARCHITECTURE.md) for screen designs and sprint plan.
+
+---
+
+## Pipeline
+
+```
+Upload Resume → Analyze (LLM) → Confirm Roles → Build Profile
+       ↓
+Search Jobs (JSearch API) → Parse JDs (LLM) → Score (Rules + LLM)
+       ↓
+Generate Artifacts (pitch + bullets + answers) → Assisted Apply
+       ↓
+Record Outcomes → Feedback Loop → Score Calibration
+```
+
+---
+
+## Branch strategy
+
+- **Never push to `main` directly.**
+- All work in feature branches → PR → merge.
+- Active branch: `feature/jsearch-job-ingestion`
