@@ -1,7 +1,7 @@
-"""JD parsing service using LLM."""
+"""JD parsing service using Azure OpenAI."""
 
 from typing import Dict, Any, Optional
-from openai import OpenAI
+from openai import AzureOpenAI
 from packages.common.llm_cache import JDParseCache
 from packages.common.logging import get_logger
 from packages.schemas.jd_schema import ParsedJD
@@ -13,17 +13,17 @@ logger = get_logger(__name__)
 
 
 class JDParser:
-    """Parse job descriptions using LLM."""
+    """Parse job descriptions using Azure OpenAI."""
 
     def __init__(self):
         """Initialize JD parser."""
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
-
-        self.client = OpenAI(api_key=api_key)
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAPI_KEY"),
+            azure_endpoint=os.getenv("AZURE_OPENAPI_ENDPOINT"),
+            api_version=os.getenv("AZURE_OPENAPI_VERSION", "2024-06-01-preview"),
+        )
+        self.model = os.getenv("AZURE_OPENAPI_DEPLOYMENT", "GPT-4")
         self.cache = JDParseCache()
-        self.model = "gpt-4"  # Use GPT-4 for structured output
 
     def _create_prompt(self, jd_text: str) -> str:
         """Create prompt for JD parsing."""
@@ -34,7 +34,7 @@ Job Description:
 
 Return a JSON object with the following structure:
 {{
-    "role": "Job title/role",
+    "role": "Job title/role name (e.g. Senior Software Engineer)",
     "seniority": "Intern|Junior|Mid|Senior|Staff|Principal|Unknown",
     "employment_type": "Full-time|Contract|Part-time|Unknown",
     "location_type": "Remote|Hybrid|Onsite|Unknown",
@@ -50,6 +50,7 @@ Return a JSON object with the following structure:
     }}
 }}
 
+IMPORTANT: The "role" field must always be a specific job title string, never null or empty.
 Return only valid JSON, no additional text."""
 
     def parse(self, jd_text: str) -> ParsedJD:
@@ -61,7 +62,6 @@ Return only valid JSON, no additional text."""
         Returns:
             Parsed JD object
         """
-        # Generate content hash for caching
         content_hash = hashlib.sha256(jd_text.encode()).hexdigest()
 
         # Check cache first
@@ -70,7 +70,6 @@ Return only valid JSON, no additional text."""
             logger.info(f"JD parse cache hit (hash: {content_hash[:8]}...)")
             return ParsedJD(**cached)
 
-        # Call LLM
         try:
             prompt = self._create_prompt(jd_text)
 
@@ -79,7 +78,7 @@ Return only valid JSON, no additional text."""
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert at parsing job descriptions. Always return valid JSON matching the exact schema.",
+                        "content": "You are an expert at parsing job descriptions. Always return valid JSON matching the exact schema. The role field must always be a specific job title.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -96,13 +95,11 @@ Return only valid JSON, no additional text."""
             # Cache result
             self.cache.set(jd_text, parsed_jd.dict())
 
-            logger.info(f"JD parsed successfully (hash: {content_hash[:8]}...)")
+            logger.info(f"JD parsed: role='{parsed_jd.role}', seniority='{parsed_jd.seniority}' (hash: {content_hash[:8]}...)")
             return parsed_jd
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
-            logger.error(f"Response was: {result_text[:500]}")
-            # Try repair
             return self._repair_parse(jd_text, result_text, e)
         except Exception as e:
             logger.error(f"JD parsing failed: {e}")
@@ -113,7 +110,6 @@ Return only valid JSON, no additional text."""
         logger.warning("Attempting to repair invalid JSON parse")
 
         try:
-            # Try to fix common JSON issues
             repair_prompt = f"""The following JSON parsing failed with error: {str(error)}
 
 Invalid JSON:
@@ -121,7 +117,7 @@ Invalid JSON:
 
 Please fix the JSON and return only valid JSON matching this schema:
 {{
-    "role": "string",
+    "role": "string (required — must be a specific job title)",
     "seniority": "Intern|Junior|Mid|Senior|Staff|Principal|Unknown",
     "employment_type": "Full-time|Contract|Part-time|Unknown",
     "location_type": "Remote|Hybrid|Onsite|Unknown",
@@ -136,10 +132,7 @@ Please fix the JSON and return only valid JSON matching this schema:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a JSON repair expert. Fix the JSON and return only valid JSON.",
-                    },
+                    {"role": "system", "content": "You are a JSON repair expert. Fix the JSON and return only valid JSON."},
                     {"role": "user", "content": repair_prompt},
                 ],
                 response_format={"type": "json_object"},
@@ -149,16 +142,12 @@ Please fix the JSON and return only valid JSON matching this schema:
             result_text = response.choices[0].message.content
             result = json.loads(result_text)
             parsed_jd = ParsedJD(**result)
-
-            # Cache repaired result
             self.cache.set(jd_text, parsed_jd.dict())
-
             logger.info("JD parse repaired successfully")
             return parsed_jd
 
         except Exception as repair_error:
             logger.error(f"Repair attempt failed: {repair_error}")
-            # Return fallback with minimal data
             return ParsedJD(
                 role="Unknown",
                 seniority="Unknown",
