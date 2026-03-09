@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApi } from '../hooks/useApi'
 import { useDropzone } from 'react-dropzone'
@@ -6,27 +6,23 @@ import { Upload, FileText, Trash2, ChevronRight, RefreshCw, AlertCircle } from '
 import Spinner from '../components/common/Spinner'
 import Toast from '../components/common/Toast'
 
-const ACCEPTED_TYPES = {
-  'application/pdf': ['.pdf'],
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-  // Some browsers report .docx under these types too
-  'application/msword': ['.doc'],
-  'application/octet-stream': ['.pdf', '.docx'],
-}
-
 export default function ResumePage() {
   const api      = useApi()
   const navigate = useNavigate()
-  const [resumes,   setResumes]   = useState([])
-  const [loading,   setLoading]   = useState(true)
-  const [uploading, setUploading] = useState(false)
+
+  const [resumes,     setResumes]     = useState([])
+  const [loading,     setLoading]     = useState(true)
+  const [uploading,   setUploading]   = useState(false)
   const [uploadError, setUploadError] = useState('')
-  const [analyzing, setAnalyzing] = useState(null)
-  const [toast,     setToast]     = useState(null)
+  const [analyzing,   setAnalyzing]   = useState(null)
+  const [toast,       setToast]       = useState(null)
+
+  // Prevent double-load in React Strict Mode
+  const didLoad = useRef(false)
 
   const showToast = (message, type = 'success') => setToast({ message, type })
 
-  /* ── Load resumes ──────────────────────────────────────────── */
+  /* ── Load ─────────────────────────────────────────────────── */
   const loadResumes = useCallback(async () => {
     try {
       const data = await api.get('/resume/')
@@ -36,36 +32,40 @@ export default function ResumePage() {
     } finally {
       setLoading(false)
     }
-  }, [api])
+  }, []) // api is stable — no deps needed
 
-  useEffect(() => { loadResumes() }, [loadResumes])
+  useEffect(() => {
+    if (didLoad.current) return
+    didLoad.current = true
+    loadResumes()
+  }, []) // run once on mount
 
-  /* ── Upload ─────────────────────────────────────────────────── */
+  /* ── Upload ────────────────────────────────────────────────── */
   const doUpload = useCallback(async (file) => {
     setUploadError('')
     setUploading(true)
     try {
+      // api.upload does NOT set Content-Type (lets browser set multipart boundary)
       const result = await api.upload('/resume/upload', file)
       if (result.duplicate) {
         showToast('This exact resume is already uploaded.', 'error')
       } else {
-        showToast(`Resume uploaded! v${result.version || ''}`)
-        await loadResumes()
+        showToast(`Resume uploaded! v${result.version ?? ''}`)
+        loadResumes()
       }
     } catch (e) {
-      // Surface the real error so the user knows what went wrong
-      const msg = e.message || 'Upload failed. Check file type (PDF/DOCX) and size (max 10 MB).'
+      const msg = e.message || 'Upload failed — check file type (PDF/DOCX) and size (≤10 MB).'
       setUploadError(msg)
       showToast(msg, 'error')
     } finally {
       setUploading(false)
     }
-  }, [api, loadResumes])
+  }, [])
 
   const onDrop = useCallback((accepted, rejected) => {
     if (rejected?.length) {
-      const reason = rejected[0]?.errors?.[0]?.message || 'File rejected.'
-      setUploadError(`File not accepted: ${reason}. Please use PDF or DOCX, max 10 MB.`)
+      const reason = rejected[0]?.errors?.[0]?.message || 'File type not supported.'
+      setUploadError(`${reason} — Please use PDF or DOCX, max 10 MB.`)
       return
     }
     if (accepted?.[0]) doUpload(accepted[0])
@@ -73,19 +73,22 @@ export default function ResumePage() {
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
-    accept: ACCEPTED_TYPES,
+    // Accept PDF and DOCX only. Do NOT include 'application/octet-stream' —
+    // that matches everything and causes confusing "wrong file type" errors.
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+    },
     maxFiles: 1,
-    maxSize: 10 * 1024 * 1024,   // 10 MB
-    noClick: false,
-    noKeyboard: false,
+    maxSize: 10 * 1024 * 1024,
   })
 
-  /* ── Analyze ────────────────────────────────────────────────── */
+  /* ── Analyze ───────────────────────────────────────────────── */
   const handleAnalyze = async (resumeId) => {
     setAnalyzing(resumeId)
     try {
       await api.post(`/resume/analyze/${resumeId}`)
-      showToast('Analysis complete! Confirm your roles.')
+      showToast('Analysis complete!')
       navigate(`/resume/${resumeId}/roles`)
     } catch (e) {
       showToast(e.message, 'error')
@@ -94,7 +97,7 @@ export default function ResumePage() {
     }
   }
 
-  /* ── Delete ─────────────────────────────────────────────────── */
+  /* ── Delete ────────────────────────────────────────────────── */
   const handleDelete = async (resumeId) => {
     if (!confirm('Delete this resume? This cannot be undone.')) return
     try {
@@ -106,7 +109,7 @@ export default function ResumePage() {
     }
   }
 
-  /* ── Render ─────────────────────────────────────────────────── */
+  /* ── Render ────────────────────────────────────────────────── */
   return (
     <div className="max-w-3xl space-y-8">
       <div>
@@ -133,14 +136,17 @@ export default function ResumePage() {
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                <button onClick={() => navigate(`/resume/${r.resume_id}/roles`)}
-                  className="btn-secondary btn-sm flex items-center gap-1.5">
+                <button
+                  onClick={() => navigate(`/resume/${r.resume_id}/roles`)}
+                  className="btn-secondary btn-sm flex items-center gap-1.5"
+                >
                   View Roles <ChevronRight size={13} />
                 </button>
                 <button
                   onClick={() => handleAnalyze(r.resume_id)}
                   disabled={analyzing === r.resume_id}
-                  className="btn-secondary btn-sm flex items-center gap-1.5">
+                  className="btn-secondary btn-sm flex items-center gap-1.5"
+                >
                   {analyzing === r.resume_id ? <Spinner size="sm" /> : <RefreshCw size={13} />}
                   {r.has_parsed_data ? 'Re-analyze' : 'Analyze'}
                 </button>
@@ -159,7 +165,6 @@ export default function ResumePage() {
           {resumes.length > 0 ? 'Upload New Version' : 'Upload Resume'}
         </h2>
 
-        {/* Error banner */}
         {uploadError && (
           <div className="mb-3 flex items-start gap-2 bg-red-950 border border-red-500/30 text-red-400 text-sm px-4 py-3 rounded-lg">
             <AlertCircle size={16} className="shrink-0 mt-0.5" />
@@ -188,7 +193,6 @@ export default function ResumePage() {
                 {isDragActive ? 'Drop it here!' : 'Drop your resume here'}
               </p>
               <p className="text-sm text-slate-500">PDF or DOCX · Max 10 MB</p>
-              {/* Explicit button as fallback for any browser click issues */}
               <button
                 type="button"
                 onClick={e => { e.stopPropagation(); open() }}

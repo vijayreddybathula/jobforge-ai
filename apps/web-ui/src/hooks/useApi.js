@@ -1,54 +1,90 @@
 import { useAuth } from '../contexts/AuthContext'
-import { useCallback } from 'react'
+import { useRef } from 'react'
 
 const BASE = '/api/v1'
 
+/**
+ * useApi — stable API client.
+ *
+ * IMPORTANT: returns a plain object whose function identities never change
+ * between renders (backed by a ref). This means pages can safely list
+ * `api.get`, `api.post`, etc. in useEffect dependency arrays without
+ * triggering infinite re-render / request storms.
+ */
 export function useApi() {
   const { session, logout } = useAuth()
 
-  const request = useCallback(async (method, path, body = null) => {
-    const headers = { 'Content-Type': 'application/json' }
-    if (session?.user_id) headers['x-user-id'] = session.user_id
+  // Keep latest session in a ref so the stable functions below can read it
+  // without needing to be recreated every render.
+  const sessionRef = useRef(session)
+  sessionRef.current = session
 
-    const res = await fetch(`${BASE}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    })
+  const logoutRef = useRef(logout)
+  logoutRef.current = logout
 
-    if (res.status === 401) {
-      logout()
-      throw new Error('Session expired. Please log in again.')
+  // Stable ref that holds all methods — created once, never recreated.
+  const apiRef = useRef(null)
+
+  if (!apiRef.current) {
+    const getHeaders = () => {
+      const h = { 'Content-Type': 'application/json' }
+      if (sessionRef.current?.user_id) h['x-user-id'] = sessionRef.current.user_id
+      return h
     }
 
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.detail || `Request failed: ${res.status}`)
-    return data
-  }, [session, logout])
+    const handleResponse = async (res) => {
+      if (res.status === 401) {
+        logoutRef.current()
+        throw new Error('Session expired. Please log in again.')
+      }
+      let data
+      try { data = await res.json() } catch { data = {} }
+      if (!res.ok) {
+        const detail = data.detail
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map(d => d.msg || JSON.stringify(d)).join(', ')
+            : `Request failed: ${res.status}`
+        throw new Error(msg)
+      }
+      return data
+    }
 
-  const upload = useCallback(async (path, file) => {
-    const formData = new FormData()
-    formData.append('file', file)
-    const headers = {}
-    if (session?.user_id) headers['x-user-id'] = session.user_id
+    const request = async (method, path, body = null) => {
+      const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: getHeaders(),
+        body: body != null ? JSON.stringify(body) : undefined,
+      })
+      return handleResponse(res)
+    }
 
-    const res = await fetch(`${BASE}${path}`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    })
+    const upload = async (path, file) => {
+      // Do NOT set Content-Type — browser sets it automatically with the
+      // correct multipart boundary when using FormData.
+      const headers = {}
+      if (sessionRef.current?.user_id) headers['x-user-id'] = sessionRef.current.user_id
 
-    if (res.status === 401) { logout(); throw new Error('Session expired.') }
-    const data = await res.json()
-    if (!res.ok) throw new Error(data.detail || 'Upload failed')
-    return data
-  }, [session, logout])
+      const formData = new FormData()
+      formData.append('file', file)
 
-  return {
-    get:    (path)        => request('GET',    path),
-    post:   (path, body)  => request('POST',   path, body),
-    put:    (path, body)  => request('PUT',    path, body),
-    delete: (path)        => request('DELETE', path),
-    upload,
+      const res = await fetch(`${BASE}${path}`, {
+        method: 'POST',
+        headers,   // NO Content-Type here
+        body: formData,
+      })
+      return handleResponse(res)
+    }
+
+    apiRef.current = {
+      get:    (path)       => request('GET',    path),
+      post:   (path, body) => request('POST',   path, body),
+      put:    (path, body) => request('PUT',    path, body),
+      delete: (path)       => request('DELETE', path),
+      upload,
+    }
   }
+
+  return apiRef.current
 }
