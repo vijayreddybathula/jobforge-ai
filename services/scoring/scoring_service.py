@@ -1,6 +1,6 @@
 """Fit scoring service."""
 
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 from sqlalchemy.orm import Session
 import re
@@ -131,8 +131,8 @@ class ScoringService:
 
         self.cache.set_score(str(job_id), str(user_id), result)
 
-        # Upsert: delete any existing score before inserting the new one so
-        # re-scoring doesn't crash on the (job_id, user_id) unique index.
+        # Upsert: delete existing score first so re-scoring doesn't crash
+        # on the (job_id, user_id) unique index.
         existing = db.query(JobScore).filter(
             JobScore.job_id == job_id,
             JobScore.user_id == user_id,
@@ -188,25 +188,22 @@ class ScoringService:
     ) -> int:
         """Score seniority alignment 0-100.
 
-        UserProfile has no experience_years column — using a fixed senior
-        assumption (80) until the profile schema is extended.
+        UserProfile has no experience_years column — using JD seniority level
+        matching with a senior-level assumption until the profile schema is
+        extended with experience_years.
         TODO: add experience_years to UserProfile and wire it here.
         """
         seniority_lower = (jd_seniority or "").lower()
 
-        # Assume the user is senior-level (Vijay's actual seniority).
-        # This gives 80 for senior roles, 70 for principal (slight over-qualification
-        # risk), and 60 for junior roles (over-qualified).
         if any(t in seniority_lower for t in ("senior", "sr.", "sr ", "lead")):
             return 80
         elif any(t in seniority_lower for t in ("principal", "staff")):
-            return 70  # slightly risky over-qualification
+            return 70
         elif any(t in seniority_lower for t in ("junior", "jr", "entry", "associate")):
             return 60  # over-qualified
         elif any(t in seniority_lower for t in ("mid", " ii", "level 2")):
             return 75
-        # Unknown / not specified — neutral good
-        return 80
+        return 80  # Unknown — neutral good
 
     def _score_domain(
         self, parsed_jd: ParsedJD, user_profile: UserProfile
