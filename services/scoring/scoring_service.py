@@ -208,19 +208,56 @@ class ScoringService:
     def _score_domain(
         self, parsed_jd: ParsedJD, user_profile: UserProfile
     ) -> int:
-        """Score domain/industry match 0-100."""
-        ai_keywords = {
-            'genai', 'llm', 'ai', 'ml', 'machine learning', 'deep learning',
-            'nlp', 'generative', 'openai', 'langchain', 'rag', 'vector',
-            'embedding', 'transformer', 'gpt', 'azure openai', 'agentic',
-        }
-        jd_ats = {k.lower() for k in (parsed_jd.ats_keywords or [])}
-        domain_overlap = jd_ats & ai_keywords
-        if len(domain_overlap) >= 3:
+        """Score domain/industry match 0-100.
+
+        Cross-matches the JD's ATS keywords against the user's own resume
+        skills (all buckets — genai, languages, frameworks, infra, data, etc.)
+        using the same fuzzy matching already used by core skill scoring.
+
+        This means the domain score reflects the user's actual background, not
+        a hardcoded set of AI buzzwords that would give every GenAI role a
+        free 90 regardless of real fit.
+
+        Scoring tiers (based on % of JD ATS keywords matched by user skills):
+          ≥ 50% matched  → 90  (strong domain alignment)
+          ≥ 25% matched  → 70  (reasonable overlap)
+          ≥ 1  matched   → 50  (some relevance)
+          0   matched    → 30  (little domain evidence)
+          no ats_keywords in JD → 60 neutral (can't penalise what isn't there)
+          no user skills yet   → 50 neutral (new user, not penalised)
+        """
+        ats_keywords = parsed_jd.ats_keywords or []
+        if not ats_keywords:
+            # JD didn't surface ATS keywords — can't evaluate domain, be neutral
+            return 60
+
+        user_skill_list = _flatten_user_skills(user_profile.skills)
+        if not user_skill_list:
+            # User hasn't populated skills yet — neutral, not penalised
+            logger.info("domain_industry: no user skills found, returning neutral 50")
+            return 50
+
+        user_normalised = [_normalise_skill(s) for s in user_skill_list]
+
+        matched = sum(
+            1 for kw in ats_keywords
+            if _skill_match(kw, user_normalised)
+        )
+        pct = matched / len(ats_keywords)
+
+        logger.info(
+            f"domain_industry: {matched}/{len(ats_keywords)} ATS keywords matched "
+            f"({pct:.0%}) — user has {len(user_skill_list)} skills"
+        )
+
+        if pct >= 0.50:
             return 90
-        elif len(domain_overlap) >= 1:
+        elif pct >= 0.25:
             return 70
-        return 50
+        elif matched >= 1:
+            return 50
+        else:
+            return 30
 
     def _score_location(
         self, location_type: str, user_preferences: UserPreferences
@@ -323,6 +360,14 @@ class ScoringService:
                     "Weak match on required skills — "
                     "populate Resume → Skills to improve accuracy"
                 )
+
+        dom = breakdown.get("domain_industry", 0)
+        if dom >= 90:
+            parts.append("Strong domain alignment")
+        elif dom >= 70:
+            parts.append("Reasonable domain overlap")
+        elif dom <= 30:
+            parts.append("Low domain overlap with your skill set")
 
         loc = breakdown.get("location_fit", 0)
         if loc == 100:
