@@ -32,10 +32,8 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
         "source":       job.source,
         "source_url":   str(job.source_url) if job.source_url else None,
         "created_at":   job.created_at.isoformat(),
-        # parsed fields
         "parse_status": parsed.parse_status if parsed else "NOT_PARSED",
         "parsed_role":  parsed.parsed_json.get("role") if parsed and parsed.parsed_json else None,
-        # user-specific score (None when not scored yet)
         "score":        score.total_score if score else None,
         "verdict":      score.verdict     if score else "NOT_SCORED",
         "breakdown":    score.breakdown   if score else None,
@@ -43,7 +41,7 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
     }
 
 
-# ── List ────────────────────────────────────────────────────────────────────────
+# ── List ─────────────────────────────────────────────────────────────────────
 
 @router.get("/", summary="List all jobs with current user's score status")
 async def list_jobs(
@@ -87,44 +85,19 @@ async def list_jobs(
             "pages": (total + limit - 1) // limit}
 
 
-# ── Single job detail ───────────────────────────────────────────────────────────
-
-@router.get("/{job_id}", summary="Get a single job enriched with this user's score")
-async def get_job(
-    job_id: UUID,
-    current_user_id: UUID = Depends(get_current_user),
-    db: Session           = Depends(get_db),
-):
-    """
-    Returns full job detail including source_url, parse status, and
-    the calling user's score/verdict.  Used by the job detail page.
-    """
-    job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found.")
-
-    parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
-    score  = (
-        db.query(JobScore)
-        .filter(JobScore.job_id == job_id, JobScore.user_id == current_user_id)
-        .first()
-    )
-    return _enrich_job(job, parsed, score)
-
-
-# ── Search & ingest ─────────────────────────────────────────────────────────────
+# ── Search & ingest ───────────────────────────────────────────────────────────
 
 @router.post("/search", summary="Search and ingest jobs via JSearch API")
 async def search_and_ingest_jobs(
-    keywords:     str           = Query(...),
-    location:     str           = Query("United States"),
-    work_type:    Optional[str] = Query(None),
-    date_posted:  Optional[str] = Query(None),
-    max_results:  int           = Query(20, ge=1, le=50),
-    auto_parse:   bool          = Query(True),
-    force_reparse: bool         = Query(False),
-    current_user_id: UUID       = Depends(get_current_user),
-    db: Session                 = Depends(get_db),
+    keywords:      str           = Query(...),
+    location:      str           = Query("United States"),
+    work_type:     Optional[str] = Query(None),
+    date_posted:   Optional[str] = Query(None),
+    max_results:   int           = Query(20, ge=1, le=50),
+    auto_parse:    bool          = Query(True),
+    force_reparse: bool          = Query(False),
+    current_user_id: UUID        = Depends(get_current_user),
+    db: Session                  = Depends(get_db),
 ):
     try:
         jsearch = JSearchSource()
@@ -166,10 +139,8 @@ async def search_and_ingest_jobs(
                     continue
                 if existing and force_reparse:
                     db.delete(existing); db.commit()
-                try:
-                    pjd = jd_parser.parse(job.text_content);     ver = "jd-parser-v1"
-                except Exception:
-                    pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
+                try:    pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
+                except: pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
                 db.add(JobParsed(job_id=job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
                 db.commit()
                 parse_results["reparsed" if existing else "parsed"] += 1
@@ -189,7 +160,7 @@ async def search_and_ingest_jobs(
     }
 
 
-# ── Bulk parse ──────────────────────────────────────────────────────────────────
+# ── Bulk parse ────────────────────────────────────────────────────────────────
 
 @router.post("/parse-all", summary="Parse all unparsed jobs in the catalog")
 async def parse_all_jobs(
@@ -210,7 +181,7 @@ async def parse_all_jobs(
         try:
             existing = db.query(JobParsed).filter(JobParsed.job_id == job.job_id).first()
             if existing: db.delete(existing); db.commit()
-            try:   pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
+            try:    pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
             except: pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
             db.add(JobParsed(job_id=job.job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
             db.commit(); results["parsed"] += 1
@@ -219,7 +190,7 @@ async def parse_all_jobs(
     return {"message": "Bulk parse complete", **results}
 
 
-# ── Single job parse ────────────────────────────────────────────────────────────
+# ── Single job parse ──────────────────────────────────────────────────────────
 
 @router.post("/{job_id}/parse")
 async def parse_job(
@@ -239,7 +210,7 @@ async def parse_job(
     if not job.text_content:
         raise HTTPException(status_code=422, detail="Job has no text content to parse.")
     try:
-        try:   pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
+        try:    pjd = jd_parser.parse(job.text_content);      ver = "jd-parser-v1"
         except: pjd = fallback_parser.parse(job.text_content); ver = "fallback-parser-v1"
         db.add(JobParsed(job_id=job_id, parsed_json=pjd.dict(), parser_version=ver, parse_status="PARSED"))
         db.commit()
@@ -248,7 +219,7 @@ async def parse_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Get parsed JD ───────────────────────────────────────────────────────────────
+# ── Get parsed JD ─────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}/parsed")
 async def get_parsed_job(
@@ -261,3 +232,28 @@ async def get_parsed_job(
         raise HTTPException(status_code=404, detail="Not parsed yet.")
     return {"job_id": str(job_id), "parse_status": parsed.parse_status,
             "parsed_jd": parsed.parsed_json, "parser_version": parsed.parser_version}
+
+
+# ── Single job detail — MUST be last so /{job_id}/xxx routes match first ──────
+
+@router.get("/{job_id}", summary="Get a single job enriched with this user's score")
+async def get_job(
+    job_id: UUID,
+    current_user_id: UUID = Depends(get_current_user),
+    db: Session           = Depends(get_db),
+):
+    """
+    Direct job lookup by ID. Returns job metadata + this user's score.
+    Registered LAST so sub-path routes like /{job_id}/parsed take priority.
+    """
+    job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
+    score  = (
+        db.query(JobScore)
+        .filter(JobScore.job_id == job_id, JobScore.user_id == current_user_id)
+        .first()
+    )
+    return _enrich_job(job, parsed, score)
