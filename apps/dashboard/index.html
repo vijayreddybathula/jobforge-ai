@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JobForge AI Dashboard</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; }
+    .app { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; padding-bottom: 20px; border-bottom: 1px solid #1e2535; }
+    .header h1 { font-size: 24px; font-weight: 700; background: linear-gradient(135deg, #6366f1, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .header .subtitle { font-size: 13px; color: #64748b; margin-top: 4px; }
+    .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-bottom: 28px; }
+    .stat-card { background: #1a1f2e; border: 1px solid #1e2535; border-radius: 12px; padding: 18px; }
+    .stat-card .label { font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; color: #e2e8f0; }
+    .stat-card .sublabel { font-size: 11px; color: #475569; margin-top: 4px; }
+    .controls { display: flex; gap: 12px; margin-bottom: 24px; align-items: center; flex-wrap: wrap; }
+    .search-form { display: flex; gap: 8px; flex: 1; }
+    .search-form input, .search-form select { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 10px 14px; color: #e2e8f0; font-size: 14px; outline: none; }
+    .search-form input:focus, .search-form select:focus { border-color: #6366f1; }
+    .search-form input { flex: 1; }
+    .btn { padding: 10px 18px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.15s; }
+    .btn-primary { background: #6366f1; color: white; }
+    .btn-primary:hover { background: #5558e8; }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-secondary { background: #1e2535; color: #94a3b8; border: 1px solid #2d3748; }
+    .btn-secondary:hover { background: #252d3d; }
+    .btn-sm { padding: 6px 12px; font-size: 12px; }
+    .btn-green { background: #059669; color: white; }
+    .btn-green:hover { background: #047857; }
+    .btn-orange { background: #d97706; color: white; }
+    .btn-orange:hover { background: #b45309; }
+    .filter-tabs { display: flex; gap: 6px; }
+    .filter-tab { padding: 6px 14px; border-radius: 20px; border: 1px solid #2d3748; background: transparent; color: #64748b; cursor: pointer; font-size: 13px; }
+    .filter-tab.active { background: #6366f1; border-color: #6366f1; color: white; }
+    .jobs-grid { display: flex; flex-direction: column; gap: 12px; }
+    .job-card { background: #1a1f2e; border: 1px solid #1e2535; border-radius: 12px; padding: 20px; transition: border-color 0.15s; }
+    .job-card:hover { border-color: #2d3748; }
+    .job-card.selected { border-color: #6366f1; }
+    .job-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+    .job-title { font-size: 16px; font-weight: 600; color: #e2e8f0; margin-bottom: 4px; }
+    .job-company { font-size: 13px; color: #94a3b8; }
+    .job-meta { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .tag { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 500; }
+    .tag-source { background: #1e293b; color: #64748b; border: 1px solid #2d3748; }
+    .tag-location { background: #0f2027; color: #38bdf8; }
+    .score-badge { display: flex; align-items: center; gap: 8px; }
+    .score-circle { width: 52px; height: 52px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex-shrink: 0; }
+    .verdict-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+    .verdict-SKIP { background: #1f1010; color: #ef4444; border: 1px solid #ef444433; }
+    .verdict-VALIDATE { background: #1a1508; color: #f59e0b; border: 1px solid #f59e0b33; }
+    .verdict-ASSISTED_APPLY { background: #0a1f12; color: #10b981; border: 1px solid #10b98133; }
+    .verdict-ELIGIBLE_AUTO_SUBMIT { background: #0c1228; color: #6366f1; border: 1px solid #6366f133; }
+    .verdict-NOT_SCORED { background: #1a1f2e; color: #64748b; border: 1px solid #2d3748; }
+    .job-actions { display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #1e2535; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px; }
+    .modal { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 16px; width: 100%; max-width: 720px; max-height: 85vh; overflow-y: auto; padding: 28px; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    .modal-header h2 { font-size: 18px; font-weight: 600; }
+    .modal-close { background: none; border: none; color: #64748b; font-size: 20px; cursor: pointer; padding: 4px; }
+    .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin-bottom: 10px; margin-top: 18px; }
+    .score-breakdown { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .breakdown-item { display: flex; justify-content: space-between; align-items: center; background: #0f1117; border-radius: 8px; padding: 10px 14px; }
+    .breakdown-label { font-size: 13px; color: #94a3b8; }
+    .breakdown-bar { height: 4px; background: #1e2535; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+    .breakdown-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+    .artifact-section { background: #0f1117; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+    .artifact-section h4 { font-size: 12px; color: #6366f1; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+    .artifact-text { font-size: 13px; color: #94a3b8; line-height: 1.6; }
+    .bullet-item { padding: 6px 0; border-bottom: 1px solid #1e2535; font-size: 13px; color: #cbd5e1; line-height: 1.5; }
+    .bullet-item:last-child { border-bottom: none; }
+    .answer-item { margin-bottom: 12px; }
+    .answer-q { font-size: 11px; color: #6366f1; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+    .answer-a { font-size: 13px; color: #94a3b8; line-height: 1.5; }
+    .keywords-list { display: flex; flex-wrap: wrap; gap: 6px; }
+    .keyword-tag { padding: 3px 10px; background: #0c1228; color: #818cf8; border: 1px solid #6366f133; border-radius: 20px; font-size: 11px; }
+    .loading { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: 14px; padding: 40px; justify-content: center; }
+    .spinner { width: 18px; height: 18px; border: 2px solid #2d3748; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .empty-state { text-align: center; padding: 60px 20px; color: #475569; }
+    .empty-state h3 { font-size: 18px; margin-bottom: 8px; color: #64748b; }
+    .toast { position: fixed; bottom: 24px; right: 24px; background: #1a1f2e; border: 1px solid #2d3748; border-radius: 10px; padding: 14px 18px; font-size: 14px; z-index: 200; animation: slideUp 0.2s ease; }
+    .toast.success { border-color: #10b98166; color: #10b981; }
+    .toast.error { border-color: #ef444466; color: #ef4444; }
+    @keyframes slideUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .pipeline-steps { display: flex; gap: 8px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+    .step { padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+    .step-done { background: #0a1f12; color: #10b981; border: 1px solid #10b98133; }
+    .step-pending { background: #1a1f2e; color: #475569; border: 1px solid #2d3748; }
+    .step-arrow { color: #2d3748; font-size: 12px; }
+    .input-group { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+    .input-group label { font-size: 12px; color: #64748b; }
+    .input-group input, .input-group select, .input-group textarea { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px; padding: 10px 12px; color: #e2e8f0; font-size: 14px; outline: none; width: 100%; }
+    .input-group input:focus, .input-group textarea:focus { border-color: #6366f1; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const API = 'http://localhost:8000/api/v1';
+const USER_ID = '9a27fa17-e08d-482a-957f-a4a0ed6ae33d';
+const HEADERS = { 'Content-Type': 'application/json', 'x-user-id': USER_ID };
+
+const api = {
+  get: (path) => fetch(`${API}${path}`, { headers: HEADERS }).then(r => r.json()),
+  post: (path, body) => fetch(`${API}${path}`, { method: 'POST', headers: HEADERS, body: body ? JSON.stringify(body) : undefined }).then(r => r.json()),
+};
+
+const scoreColor = (s) => s >= 85 ? '#6366f1' : s >= 75 ? '#10b981' : s >= 65 ? '#f59e0b' : '#ef4444';
+const scoreBg = (s) => s >= 85 ? '#0c1228' : s >= 75 ? '#0a1f12' : s >= 65 ? '#1a1508' : '#1f1010';
+
+function ScoreCircle({ score }) {
+  if (!score) return <div className="score-circle" style={{ background: '#1a1f2e', color: '#475569' }}>—</div>;
+  return (
+    <div className="score-circle" style={{ background: scoreBg(score), color: scoreColor(score), border: `2px solid ${scoreColor(score)}33` }}>
+      {score}
+    </div>
+  );
+}
+
+function VerdictBadge({ verdict }) {
+  const label = verdict === 'ELIGIBLE_AUTO_SUBMIT' ? 'AUTO' : verdict === 'ASSISTED_APPLY' ? 'APPLY' : verdict === 'NOT_SCORED' ? 'UNSCORE' : verdict;
+  return <span className={`verdict-badge verdict-${verdict || 'NOT_SCORED'}`}>{label || 'NOT SCORED'}</span>;
+}
+
+function Toast({ msg, type, onClose }) {
+  React.useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, []);
+  return <div className={`toast ${type}`}>{msg}</div>;
+}
+
+function ArtifactModal({ job, score, onClose }) {
+  const [artifacts, setArtifacts] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+
+  const generate = async () => {
+    setLoading(true);
+    const res = await fetch(`${API}/jobs/${job.job_id}/artifacts/generate?artifact_types=pitch&artifact_types=resume&artifact_types=answers`, { method: 'POST', headers: HEADERS });
+    const data = await res.json();
+    setArtifacts(data.artifacts);
+    setLoading(false);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal">
+        <div className="modal-header">
+          <div>
+            <h2>{job.title}</h2>
+            <div style={{ fontSize: 13, color: '#64748b', marginTop: 4 }}>{job.company} · Score: {score?.total_score || '—'}</div>
+          </div>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+
+        {!artifacts && (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <p style={{ color: '#64748b', marginBottom: 16, fontSize: 14 }}>Generate AI-powered pitch, tailored resume bullets, and application answers.</p>
+            <button className="btn btn-primary" onClick={generate} disabled={loading}>
+              {loading ? 'Generating...' : '✨ Generate Artifacts'}
+            </button>
+          </div>
+        )}
+
+        {loading && <div className="loading"><div className="spinner"/><span>GPT-4 generating artifacts...</span></div>}
+
+        {artifacts && (
+          <>
+            {artifacts.pitch && (
+              <>
+                <div className="section-title">🎯 Recruiter Pitch</div>
+                <div className="artifact-section"><p className="artifact-text">{artifacts.pitch}</p></div>
+              </>
+            )}
+
+            {artifacts.resume && (
+              <>
+                <div className="section-title">📄 Tailored Resume</div>
+                <div className="artifact-section">
+                  {artifacts.resume.summary && <p className="artifact-text" style={{ marginBottom: 12 }}>{artifacts.resume.summary}</p>}
+                  {(artifacts.resume.bullets || []).map((b, i) => <div key={i} className="bullet-item">• {b}</div>)}
+                  {artifacts.resume.bullet_ids_used && (
+                    <div style={{ marginTop: 10, fontSize: 11, color: '#475569' }}>Source bullets: {artifacts.resume.bullet_ids_used.join(', ')}</div>
+                  )}
+                </div>
+                {artifacts.resume.keywords_incorporated?.length > 0 && (
+                  <>
+                    <div className="section-title">🔑 ATS Keywords</div>
+                    <div className="keywords-list">
+                      {artifacts.resume.keywords_incorporated.map(k => <span key={k} className="keyword-tag">{k}</span>)}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {artifacts.answers && (
+              <>
+                <div className="section-title">💬 Application Answers</div>
+                <div className="artifact-section">
+                  {Object.entries(artifacts.answers).map(([q, a]) => (
+                    <div key={q} className="answer-item">
+                      <div className="answer-q">{q.replace(/_/g, ' ')}</div>
+                      <div className="answer-a">{a}</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SearchModal({ onClose, onSuccess }) {
+  const [keywords, setKeywords] = React.useState('Senior GenAI Engineer');
+  const [location, setLocation] = React.useState('Dallas, TX');
+  const [workType, setWorkType] = React.useState('remote,hybrid');
+  const [maxResults, setMaxResults] = React.useState(10);
+  const [loading, setLoading] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+
+  const search = async () => {
+    setLoading(true);
+    const params = new URLSearchParams({ keywords, location, work_type: workType, max_results: maxResults, auto_parse: true });
+    const res = await fetch(`${API}/jobs/search?${params}`, { method: 'POST', headers: HEADERS });
+    const data = await res.json();
+    setResult(data);
+    setLoading(false);
+    if (data.ingested > 0 || data.parsed > 0) onSuccess();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: 480 }}>
+        <div className="modal-header">
+          <h2>🔍 Search Jobs</h2>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="input-group"><label>Keywords</label><input value={keywords} onChange={e => setKeywords(e.target.value)} /></div>
+        <div className="input-group"><label>Location</label><input value={location} onChange={e => setLocation(e.target.value)} /></div>
+        <div className="input-group">
+          <label>Work Type</label>
+          <select value={workType} onChange={e => setWorkType(e.target.value)}>
+            <option value="remote,hybrid">Remote + Hybrid</option>
+            <option value="remote">Remote only</option>
+            <option value="hybrid">Hybrid only</option>
+            <option value="onsite">Onsite</option>
+          </select>
+        </div>
+        <div className="input-group"><label>Max Results</label>
+          <select value={maxResults} onChange={e => setMaxResults(e.target.value)}>
+            {[5,10,20,50].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={search} disabled={loading}>
+          {loading ? 'Searching...' : 'Search & Ingest'}
+        </button>
+        {result && (
+          <div style={{ marginTop: 16, padding: 14, background: '#0f1117', borderRadius: 8, fontSize: 13 }}>
+            <div style={{ color: '#10b981' }}>✓ Fetched: {result.total_fetched} | Ingested: {result.ingested} | Parsed: {result.parsed}</div>
+            {result.duplicates > 0 && <div style={{ color: '#64748b', marginTop: 4 }}>Duplicates skipped: {result.duplicates}</div>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [jobs, setJobs] = React.useState([]);
+  const [scores, setScores] = React.useState({});
+  const [loading, setLoading] = React.useState(true);
+  const [filter, setFilter] = React.useState('all');
+  const [selectedJob, setSelectedJob] = React.useState(null);
+  const [showSearch, setShowSearch] = React.useState(false);
+  const [toast, setToast] = React.useState(null);
+  const [scoring, setScoring] = React.useState({});
+  const [stats, setStats] = React.useState({ total: 0, scored: 0, applied: 0, apply: 0, auto: 0 });
+
+  const showToast = (msg, type = 'success') => setToast({ msg, type });
+
+  const loadJobs = async () => {
+    setLoading(true);
+    try {
+      // Get all raw jobs via ingest status check isn't available, use a known list approach
+      // We'll load from parsed jobs perspective
+      const resp = await fetch(`${API}/users`, { headers: HEADERS });
+      // Workaround: search with empty to get jobs (use a batch score summary)
+      // Actually load recently ingested jobs by fetching known job_ids
+      // For now load via a direct DB perspective isn't exposed, so we show what we have scored
+      setLoading(false);
+    } catch(e) {
+      setLoading(false);
+    }
+  };
+
+  // Load jobs by re-searching (duplicates=ok, already in db)
+  const loadFromSearch = async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ keywords: 'Senior GenAI Engineer', location: 'Dallas, TX', work_type: 'remote,hybrid', max_results: 20, auto_parse: true });
+      const res = await fetch(`${API}/jobs/search?${params}`, { method: 'POST', headers: HEADERS });
+      const data = await res.json();
+
+      // Now score all ingested job_ids we know about
+      // Use a list endpoint workaround — collect job_ids from response
+      if (data.job_ids?.length > 0 || data.duplicates > 0) {
+        // Fetch scores for what we have
+        await loadScores(data.job_ids || []);
+      }
+      setLoading(false);
+    } catch(e) {
+      setLoading(false);
+    }
+  };
+
+  const loadScores = async (jobIds) => {
+    const newScores = {};
+    for (const jid of jobIds) {
+      try {
+        const s = await api.get(`/jobs/${jid}/score?user_id=${USER_ID}`);
+        if (s.total_score) newScores[jid] = s;
+      } catch(e) {}
+    }
+    setScores(prev => ({ ...prev, ...newScores }));
+  };
+
+  const scoreJob = async (jobId) => {
+    setScoring(prev => ({ ...prev, [jobId]: true }));
+    try {
+      const s = await fetch(`${API}/jobs/${jobId}/score?user_id=${USER_ID}`, { method: 'POST', headers: HEADERS }).then(r => r.json());
+      if (s.total_score) {
+        setScores(prev => ({ ...prev, [jobId]: s }));
+        showToast(`Scored: ${s.total_score}/100 — ${s.verdict}`);
+      }
+    } catch(e) { showToast('Scoring failed', 'error'); }
+    setScoring(prev => ({ ...prev, [jobId]: false }));
+  };
+
+  // Minimal job list — use hardcoded known job IDs from session for demo
+  // In production this needs a GET /jobs list endpoint
+  const KNOWN_JOBS = [
+    { job_id: 'ff56043c-81d0-4a45-8164-38e024ac16e6', title: 'Senior Software Engineer', company: 'Deloitte', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '4f2e4e6a-0fc7-4cb6-9f4e-5af74c8012a7', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '2d71bee2-10f5-4436-b5a5-0d779607cd68', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '16b88e13-db87-440a-80dc-af0e7a659d09', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '9f469ff7-bd37-4edc-b44d-fe36fe967553', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '744f40f8-5bb1-454c-a802-1c6d52d53816', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: 'efeec720-3ba0-4cb9-998c-37927d0c769e', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '29028674-2412-4d08-bc47-dd752f49e64a', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: 'fca494b9-d638-42e7-b864-868e62bc115f', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+    { job_id: '9602140b-23ab-4469-8e26-ecffd4272952', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
+  ];
+
+  React.useEffect(() => {
+    setJobs(KNOWN_JOBS);
+    setLoading(false);
+    // Load existing scores
+    loadScores(KNOWN_JOBS.map(j => j.job_id));
+  }, []);
+
+  // Enrich job titles from parsed data
+  React.useEffect(() => {
+    KNOWN_JOBS.forEach(async (job) => {
+      try {
+        const parsed = await api.get(`/jobs/${job.job_id}/parsed`);
+        if (parsed.parsed_jd?.role && parsed.parsed_jd.role !== 'Unknown') {
+          setJobs(prev => prev.map(j => j.job_id === job.job_id ? { ...j, title: parsed.parsed_jd.role, parsedData: parsed.parsed_jd } : j));
+        }
+      } catch(e) {}
+    });
+  }, []);
+
+  const filteredJobs = jobs.filter(job => {
+    const score = scores[job.job_id];
+    if (filter === 'all') return true;
+    if (filter === 'unscored') return !score;
+    if (filter === 'apply') return score?.verdict === 'ASSISTED_APPLY';
+    if (filter === 'auto') return score?.verdict === 'ELIGIBLE_AUTO_SUBMIT';
+    if (filter === 'skip') return score?.verdict === 'SKIP';
+    return true;
+  });
+
+  const scored = Object.keys(scores).length;
+  const toApply = Object.values(scores).filter(s => s.verdict === 'ASSISTED_APPLY').length;
+  const autoEligible = Object.values(scores).filter(s => s.verdict === 'ELIGIBLE_AUTO_SUBMIT').length;
+  const avgScore = scored > 0 ? Math.round(Object.values(scores).reduce((a, s) => a + s.total_score, 0) / scored) : 0;
+
+  return (
+    <div className="app">
+      <div className="header">
+        <div>
+          <h1>⚡ JobForge AI</h1>
+          <div className="subtitle">Intelligent job application pipeline</div>
+        </div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn btn-secondary" onClick={() => loadScores(jobs.map(j => j.job_id))}>↻ Refresh Scores</button>
+          <button className="btn btn-primary" onClick={() => setShowSearch(true)}>+ Search Jobs</button>
+        </div>
+      </div>
+
+      <div className="stats-row">
+        <div className="stat-card"><div className="label">Total Jobs</div><div className="value">{jobs.length}</div><div className="sublabel">in pipeline</div></div>
+        <div className="stat-card"><div className="label">Scored</div><div className="value">{scored}</div><div className="sublabel">of {jobs.length}</div></div>
+        <div className="stat-card"><div className="label">Avg Score</div><div className="value" style={{ color: scoreColor(avgScore) }}>{avgScore || '—'}</div><div className="sublabel">across scored</div></div>
+        <div className="stat-card"><div className="label">To Apply</div><div className="value" style={{ color: '#10b981' }}>{toApply}</div><div className="sublabel">ASSISTED_APPLY</div></div>
+        <div className="stat-card"><div className="label">Auto-Eligible</div><div className="value" style={{ color: '#6366f1' }}>{autoEligible}</div><div className="sublabel">score ≥ 85</div></div>
+      </div>
+
+      <div className="pipeline-steps">
+        <span className="step step-done">✓ Ingest</span><span className="step-arrow">→</span>
+        <span className="step step-done">✓ Parse JD</span><span className="step-arrow">→</span>
+        <span className="step step-done">✓ Score</span><span className="step-arrow">→</span>
+        <span className="step step-done">✓ Artifacts</span><span className="step-arrow">→</span>
+        <span className="step step-done">✓ Apply</span><span className="step-arrow">→</span>
+        <span className="step step-done">✓ Outcomes</span>
+      </div>
+
+      <div className="controls">
+        <div className="filter-tabs">
+          {[['all','All'], ['unscored','Unscored'], ['apply','To Apply'], ['auto','Auto'], ['skip','Skip']].map(([v, l]) => (
+            <button key={v} className={`filter-tab ${filter === v ? 'active' : ''}`} onClick={() => setFilter(v)}>{l}</button>
+          ))}
+        </div>
+        <div style={{ marginLeft: 'auto', fontSize: 13, color: '#475569' }}>{filteredJobs.length} jobs</div>
+      </div>
+
+      {loading ? (
+        <div className="loading"><div className="spinner"/><span>Loading pipeline...</span></div>
+      ) : filteredJobs.length === 0 ? (
+        <div className="empty-state">
+          <h3>No jobs in this filter</h3>
+          <p>Search for jobs or change the filter</p>
+        </div>
+      ) : (
+        <div className="jobs-grid">
+          {filteredJobs.map(job => {
+            const score = scores[job.job_id];
+            return (
+              <div key={job.job_id} className={`job-card ${selectedJob?.job_id === job.job_id ? 'selected' : ''}`}>
+                <div className="job-header">
+                  <div style={{ flex: 1 }}>
+                    <div className="job-title">{job.title}</div>
+                    <div className="job-company">{job.company}</div>
+                    <div className="job-meta">
+                      <span className="tag tag-source">{job.source}</span>
+                      {job.location && <span className="tag tag-location">{job.location}</span>}
+                      {score && <VerdictBadge verdict={score.verdict} />}
+                    </div>
+                  </div>
+                  <div className="score-badge">
+                    <ScoreCircle score={score?.total_score} />
+                  </div>
+                </div>
+
+                {score?.breakdown && (
+                  <div className="score-breakdown">
+                    {Object.entries(score.breakdown).filter(([k]) => !k.startsWith('_')).map(([k, v]) => (
+                      <div key={k} className="breakdown-item">
+                        <div>
+                          <div className="breakdown-label">{k.replace(/_/g, ' ')}</div>
+                          <div className="breakdown-bar"><div className="breakdown-fill" style={{ width: `${v}%`, background: scoreColor(v) }}/></div>
+                        </div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: scoreColor(v), marginLeft: 12 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {score?.rationale && (
+                  <div style={{ fontSize: 12, color: '#64748b', marginTop: 10, padding: '8px 12px', background: '#0f1117', borderRadius: 6 }}>
+                    {score.rationale}
+                  </div>
+                )}
+
+                <div className="job-actions">
+                  {!score && (
+                    <button className="btn btn-secondary btn-sm" onClick={() => scoreJob(job.job_id)} disabled={scoring[job.job_id]}>
+                      {scoring[job.job_id] ? 'Scoring...' : '⚡ Score'}
+                    </button>
+                  )}
+                  {score && (
+                    <button className="btn btn-secondary btn-sm" onClick={() => scoreJob(job.job_id)} disabled={scoring[job.job_id]}>↻ Re-score</button>
+                  )}
+                  <button className="btn btn-secondary btn-sm" onClick={() => setSelectedJob(job)}>✨ Artifacts</button>
+                  {score && (score.verdict === 'ASSISTED_APPLY' || score.verdict === 'ELIGIBLE_AUTO_SUBMIT') && (
+                    <a href={`https://www.google.com/search?q=${encodeURIComponent(job.title + ' ' + job.company + ' jobs')}`} target="_blank" rel="noreferrer">
+                      <button className="btn btn-green btn-sm">🚀 Apply</button>
+                    </a>
+                  )}
+                  <a href={`http://localhost:8000/api/v1/jobs/${job.job_id}/parsed`} target="_blank" rel="noreferrer">
+                    <button className="btn btn-secondary btn-sm">📋 JD</button>
+                  </a>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {selectedJob && <ArtifactModal job={selectedJob} score={scores[selectedJob.job_id]} onClose={() => setSelectedJob(null)} />}
+      {showSearch && <SearchModal onClose={() => setShowSearch(false)} onSuccess={() => { setShowSearch(false); showToast('Jobs ingested! Refresh scores.'); }} />}
+      {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
