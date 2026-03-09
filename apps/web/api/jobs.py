@@ -8,7 +8,7 @@ from uuid import UUID
 from packages.database.connection import get_db
 from packages.database.models import JobRaw, JobParsed, JobScore
 from services.job_ingestion.ingestion_service import IngestionService
-from services.job_ingestion.sources.jsearch_source import JSearchSource
+from services.job_ingestion.sources.jsearch_source import JSearchSource, JSearchAPIError
 from services.job_ingestion.normalizer import JobNormalizer
 from services.jd_parser.jd_parser import JDParser
 from services.jd_parser.fallback_parser import FallbackParser
@@ -87,6 +87,31 @@ async def list_jobs(
             "pages": (total + limit - 1) // limit}
 
 
+# ── JSearch connectivity test — must be before /search to avoid route conflict ─
+
+@router.get("/search/test", summary="Test JSearch API connectivity without ingesting")
+async def test_jsearch_connection(
+    current_user_id: UUID = Depends(get_current_user),
+):
+    """
+    Sends a minimal query to JSearch and reports back whether the API key
+    is valid and the service is reachable. Use this to diagnose 'No jobs found'
+    issues before running a full search.
+    """
+    try:
+        jsearch = JSearchSource()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    result = jsearch.test_connection()
+    if not result["ok"]:
+        raise HTTPException(
+            status_code=502,
+            detail=f"JSearch connectivity test failed: {result['detail']}",
+        )
+    return result
+
+
 # ── Search & ingest ───────────────────────────────────────────────────────────
 
 @router.post("/search", summary="Search and ingest jobs via JSearch API")
@@ -106,21 +131,43 @@ async def search_and_ingest_jobs(
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    raw_jobs = jsearch.search_jobs(
-        keywords=keywords, location=location,
-        work_type=work_type, date_posted=date_posted, max_results=max_results,
-    )
+    try:
+        raw_jobs = jsearch.search_jobs(
+            keywords=keywords, location=location,
+            work_type=work_type, date_posted=date_posted, max_results=max_results,
+        )
+    except JSearchAPIError as e:
+        # Surface the real error (quota exceeded, bad key, network, etc.)
+        # instead of silently returning an empty result.
+        logger.error(f"JSearch API error during search: {e} (HTTP {e.status_code})")
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "JSearch API error",
+                "message": str(e),
+                "status_code": e.status_code,
+                "body": e.body,
+                "hint": "Check JSEARCH_API_KEY, RapidAPI subscription, and quota at rapidapi.com",
+            },
+        )
+
     if not raw_jobs:
-        return {"message": "No jobs found", "ingested": 0, "duplicates": 0, "job_ids": []}
+        return {
+            "message": "No jobs found for these search parameters",
+            "keywords": keywords,
+            "location": location,
+            "ingested": 0,
+            "duplicates": 0,
+            "job_ids": [],
+            "hint": "Try broader keywords or a different location. Use GET /jobs/search/test to verify API connectivity.",
+        }
 
     ingest_result    = ingestion_service.ingest_batch(jobs=raw_jobs, source="jsearch", db=db)
     ingested_job_ids = ingest_result.get("job_ids", [])
 
-    # FIX: collect job_ids for ALL fetched jobs (new + duplicate).
-    # Previously only newly-ingested IDs were included, so duplicate jobs
-    # were fetched but never parsed or returned — causing the catalog to
-    # stay stuck at the initial count even after repeated searches.
-    all_candidate_ids = list(ingested_job_ids)  # start with newly ingested
+    # Collect job_ids for ALL fetched jobs (new + duplicate) so duplicates
+    # still get parsed and returned in the catalog.
+    all_candidate_ids = list(ingested_job_ids)
     for job_data in raw_jobs:
         normalized = _normalizer.normalize(
             title=job_data.get("title", ""),
@@ -279,10 +326,6 @@ async def get_job(
     current_user_id: UUID = Depends(get_current_user),
     db: Session           = Depends(get_db),
 ):
-    """
-    Direct job lookup by ID. Returns job metadata + this user's score.
-    Registered LAST so sub-path routes like /{job_id}/parsed take priority.
-    """
     job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")

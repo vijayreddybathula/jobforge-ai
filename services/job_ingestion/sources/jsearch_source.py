@@ -10,6 +10,14 @@ logger = get_logger(__name__)
 JSEARCH_BASE_URL = "https://jsearch.p.rapidapi.com"
 
 
+class JSearchAPIError(Exception):
+    """Raised when the JSearch API returns an error response."""
+    def __init__(self, message: str, status_code: Optional[int] = None, body: Optional[str] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
 class JSearchSource:
     """Fetch jobs from JSearch API (RapidAPI) - works from any container."""
 
@@ -25,15 +33,52 @@ class JSearchSource:
             "X-RapidAPI-Host": self.api_host,
         }
 
+    def test_connection(self) -> Dict[str, Any]:
+        """Ping JSearch with a minimal query to verify API key and connectivity.
+
+        Returns a dict with 'ok', 'status_code', and 'detail'.
+        Does NOT ingest anything.
+        """
+        try:
+            response = requests.get(
+                f"{JSEARCH_BASE_URL}/search",
+                headers=self.headers,
+                params={"query": "software engineer", "page": 1, "num_pages": 1},
+                timeout=10,
+            )
+            body_preview = response.text[:300]
+            if response.status_code == 200:
+                data = response.json()
+                count = len(data.get("data", []))
+                return {
+                    "ok": True,
+                    "status_code": 200,
+                    "jobs_returned": count,
+                    "detail": f"JSearch reachable — {count} jobs returned for test query",
+                }
+            else:
+                return {
+                    "ok": False,
+                    "status_code": response.status_code,
+                    "detail": f"JSearch returned {response.status_code}: {body_preview}",
+                }
+        except requests.exceptions.Timeout:
+            return {"ok": False, "status_code": None, "detail": "JSearch API timed out"}
+        except Exception as e:
+            return {"ok": False, "status_code": None, "detail": str(e)}
+
     def search_jobs(
         self,
         keywords: str,
         location: str = "United States",
-        work_type: Optional[str] = None,   # remote, onsite, hybrid (comma-separated)
-        date_posted: Optional[str] = None,  # today, 3days, week, month
+        work_type: Optional[str] = None,
+        date_posted: Optional[str] = None,
         max_results: int = 20,
     ) -> List[Dict[str, Any]]:
         """Search jobs via JSearch API and return normalized job list.
+
+        Raises JSearchAPIError on HTTP/network failures so callers can
+        distinguish real API errors from genuinely empty result sets.
 
         Args:
             keywords: Job title / role keywords e.g. 'Senior GenAI Engineer'
@@ -62,7 +107,6 @@ class JSearchSource:
                 params["date_posted"] = date_posted
 
             if work_type:
-                # JSearch uses employment_types for remote/onsite/hybrid
                 params["remote_jobs_only"] = "true" if "remote" in work_type.lower() else "false"
 
             try:
@@ -72,18 +116,28 @@ class JSearchSource:
                     params=params,
                     timeout=15,
                 )
-                response.raise_for_status()
-                data = response.json()
-
             except requests.exceptions.Timeout:
-                logger.error("JSearch API timeout")
-                break
-            except requests.exceptions.HTTPError as e:
-                logger.error(f"JSearch API HTTP error: {e}")
-                break
+                raise JSearchAPIError("JSearch API timed out after 15s")
+            except requests.exceptions.ConnectionError as e:
+                raise JSearchAPIError(f"JSearch API connection failed: {e}")
             except Exception as e:
-                logger.error(f"JSearch API error: {e}")
-                break
+                raise JSearchAPIError(f"JSearch API request failed: {e}")
+
+            if not response.ok:
+                body_preview = response.text[:500]
+                logger.error(
+                    f"JSearch API HTTP {response.status_code} on page {page}: {body_preview}"
+                )
+                raise JSearchAPIError(
+                    f"JSearch API returned HTTP {response.status_code}",
+                    status_code=response.status_code,
+                    body=body_preview,
+                )
+
+            try:
+                data = response.json()
+            except Exception as e:
+                raise JSearchAPIError(f"JSearch API returned non-JSON response: {e}")
 
             raw_jobs = data.get("data", [])
             if not raw_jobs:
@@ -114,7 +168,6 @@ class JSearchSource:
             ]
             location = ", ".join(p for p in location_parts if p).strip()
 
-            # Prefer is_remote flag from API
             if raw.get("job_is_remote"):
                 location = f"{location} (Remote)".strip(", ")
 
@@ -133,7 +186,6 @@ class JSearchSource:
                 "location": location,
                 "description": description,
                 "posted_at": posted_at,
-                # Extra metadata stored but not used by IngestionService core
                 "employment_type": raw.get("job_employment_type", ""),
                 "salary_min": raw.get("job_min_salary"),
                 "salary_max": raw.get("job_max_salary"),
