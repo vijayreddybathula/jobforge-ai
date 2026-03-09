@@ -15,16 +15,10 @@ logger = get_logger(__name__)
 
 
 def _normalise_skill(s: str) -> str:
-    """Lower-case, strip parenthetical aliases and punctuation for fuzzy comparison.
-
-    Examples:
-        'Retrieval-Augmented Generation (RAG)' -> 'retrieval augmented generation rag'
-        'LangGraph'                             -> 'langgraph'
-        'Pytest'                                -> 'pytest'
-    """
+    """Lower-case, strip parenthetical aliases and punctuation."""
     s = s.lower()
-    s = re.sub(r'[()\[\]]', ' ', s)   # expand parentheticals
-    s = re.sub(r'[-/]', ' ', s)        # hyphens/slashes → space
+    s = re.sub(r'[()\[\]]', ' ', s)
+    s = re.sub(r'[-/]', ' ', s)
     return ' '.join(s.split())
 
 
@@ -32,7 +26,6 @@ def _skill_match(jd_skill: str, user_skills_normalised: List[str]) -> bool:
     """Return True if jd_skill fuzzy-matches any skill in the user list."""
     norm_jd = _normalise_skill(jd_skill)
     jd_tokens = set(norm_jd.split())
-
     for us in user_skills_normalised:
         if norm_jd in us or us in norm_jd:
             return True
@@ -45,10 +38,7 @@ def _skill_match(jd_skill: str, user_skills_normalised: List[str]) -> bool:
 
 
 def _flatten_user_skills(user_skills: Optional[Dict[str, Any]]) -> List[str]:
-    """Flatten every value in the skills dict into a single list.
-
-    Handles any storage shape — 'languages'/'frameworks'/'genai'/... or flat.
-    """
+    """Flatten every value in the skills dict into a single list."""
     if not user_skills:
         return []
     skills: List[str] = []
@@ -58,6 +48,32 @@ def _flatten_user_skills(user_skills: Optional[Dict[str, Any]]) -> List[str]:
         elif isinstance(v, str) and v:
             skills.append(v)
     return skills
+
+
+def _user_seniority_from_roles(core_roles: Optional[List[str]]) -> str:
+    """
+    Infer the user's own seniority level from their confirmed role titles.
+    Returns a normalised string: 'principal', 'senior', 'mid', 'junior', or 'unknown'.
+
+    Examples:
+      ['Senior GenAI Engineer']        -> 'senior'
+      ['Principal ML Engineer']        -> 'principal'
+      ['Software Engineer II']         -> 'mid'
+      ['Junior Data Analyst']          -> 'junior'
+      ['Data Scientist']               -> 'unknown'  (no seniority signal)
+    """
+    if not core_roles:
+        return 'unknown'
+    combined = ' '.join(core_roles).lower()
+    if any(t in combined for t in ('principal', 'staff', 'distinguished', 'fellow')):
+        return 'principal'
+    if any(t in combined for t in ('senior', 'sr.', 'sr ', 'lead', 'manager', 'head of')):
+        return 'senior'
+    if any(t in combined for t in ('junior', 'jr', 'entry', 'associate', 'intern')):
+        return 'junior'
+    if any(t in combined for t in (' ii', ' iii', 'level 2', 'level 3', 'mid')):
+        return 'mid'
+    return 'unknown'
 
 
 class ScoringService:
@@ -131,8 +147,6 @@ class ScoringService:
 
         self.cache.set_score(str(job_id), str(user_id), result)
 
-        # Upsert: delete existing score first so re-scoring doesn't crash
-        # on the (job_id, user_id) unique index.
         existing = db.query(JobScore).filter(
             JobScore.job_id == job_id,
             JobScore.user_id == user_id,
@@ -148,7 +162,7 @@ class ScoringService:
             breakdown=breakdown,
             verdict=verdict,
             rationale=rationale,
-            scoring_version="score-v2",
+            scoring_version="score-v3",
         ))
         db.commit()
 
@@ -160,25 +174,18 @@ class ScoringService:
     def _score_core_skills(
         self, required_skills: Optional[List[str]], user_skills: Optional[Dict[str, Any]]
     ) -> int:
-        """Score core skill match 0-100."""
         if not required_skills:
             return 100
-
         user_list = _flatten_user_skills(user_skills)
         if not user_list:
             return 0
-
         user_normalised = [_normalise_skill(s) for s in user_list]
-        matches = sum(
-            1 for skill in required_skills
-            if _skill_match(skill, user_normalised)
-        )
+        matches = sum(1 for s in required_skills if _skill_match(s, user_normalised))
         return int((matches / len(required_skills)) * 100)
 
     def _score_nice_to_have_skills(
         self, nice_skills: Optional[List[str]], user_skills: Optional[Dict[str, Any]]
     ) -> int:
-        """Score nice-to-have skills 0-100."""
         if not nice_skills:
             return 50
         return self._score_core_skills(nice_skills, user_skills)
@@ -186,63 +193,84 @@ class ScoringService:
     def _score_seniority(
         self, jd_seniority: str, user_profile: UserProfile
     ) -> int:
-        """Score seniority alignment 0-100.
-
-        UserProfile has no experience_years column — using JD seniority level
-        matching with a senior-level assumption until the profile schema is
-        extended with experience_years.
-        TODO: add experience_years to UserProfile and wire it here.
         """
-        seniority_lower = (jd_seniority or "").lower()
+        Score seniority alignment 0-100.
 
-        if any(t in seniority_lower for t in ("senior", "sr.", "sr ", "lead")):
-            return 80
-        elif any(t in seniority_lower for t in ("principal", "staff")):
-            return 70
-        elif any(t in seniority_lower for t in ("junior", "jr", "entry", "associate")):
-            return 60  # over-qualified
-        elif any(t in seniority_lower for t in ("mid", " ii", "level 2")):
-            return 75
-        return 80  # Unknown — neutral good
+        Compares JD seniority level against the seniority signal embedded
+        in the user's own confirmed role titles (core_roles).
+
+        Match matrix:
+          user=principal vs jd=principal/staff  → 100  (exact)
+          user=principal vs jd=senior            → 85   (slightly overqualified)
+          user=senior    vs jd=senior/lead        → 100  (exact)
+          user=senior    vs jd=principal          → 75   (stretch)
+          user=senior    vs jd=mid                → 80   (overqualified)
+          user=senior    vs jd=junior             → 60   (overqualified)
+          user=mid       vs jd=mid                → 100
+          user=mid       vs jd=senior             → 65   (under)
+          user=junior    vs jd=junior             → 100
+          user=junior    vs jd=senior             → 40   (under)
+          user=unknown   vs any                   → 75   (neutral)
+        """
+        jd   = (jd_seniority or 'mid').lower()
+        user = _user_seniority_from_roles(user_profile.core_roles)
+
+        # Determine JD bucket
+        if any(t in jd for t in ('principal', 'staff', 'distinguished')):
+            jd_level = 'principal'
+        elif any(t in jd for t in ('senior', 'sr.', 'sr ', 'lead')):
+            jd_level = 'senior'
+        elif any(t in jd for t in ('junior', 'jr', 'entry', 'associate')):
+            jd_level = 'junior'
+        elif any(t in jd for t in ('mid', ' ii', 'level 2')):
+            jd_level = 'mid'
+        else:
+            jd_level = 'mid'  # Unknown JD level defaults to mid
+
+        if user == 'unknown':
+            return 75  # Can't evaluate — neutral
+
+        MATRIX = {
+            ('principal', 'principal'): 100,
+            ('principal', 'senior'):     85,
+            ('principal', 'mid'):        70,
+            ('principal', 'junior'):     55,
+            ('senior',    'principal'):  75,
+            ('senior',    'senior'):    100,
+            ('senior',    'mid'):        80,
+            ('senior',    'junior'):     60,
+            ('mid',       'principal'):  55,
+            ('mid',       'senior'):     65,
+            ('mid',       'mid'):       100,
+            ('mid',       'junior'):     80,
+            ('junior',    'principal'):  35,
+            ('junior',    'senior'):     40,
+            ('junior',    'mid'):        70,
+            ('junior',    'junior'):    100,
+        }
+        return MATRIX.get((user, jd_level), 75)
 
     def _score_domain(
         self, parsed_jd: ParsedJD, user_profile: UserProfile
     ) -> int:
-        """Score domain/industry match 0-100.
+        """
+        Score domain/industry match 0-100.
 
-        Cross-matches the JD's ATS keywords against the user's own resume
-        skills (all buckets — genai, languages, frameworks, infra, data, etc.)
-        using the same fuzzy matching already used by core skill scoring.
-
-        This means the domain score reflects the user's actual background, not
-        a hardcoded set of AI buzzwords that would give every GenAI role a
-        free 90 regardless of real fit.
-
-        Scoring tiers (based on % of JD ATS keywords matched by user skills):
-          ≥ 50% matched  → 90  (strong domain alignment)
-          ≥ 25% matched  → 70  (reasonable overlap)
-          ≥ 1  matched   → 50  (some relevance)
-          0   matched    → 30  (little domain evidence)
-          no ats_keywords in JD → 60 neutral (can't penalise what isn't there)
-          no user skills yet   → 50 neutral (new user, not penalised)
+        Cross-matches JD ATS keywords against all user skills (all buckets)
+        using the same fuzzy matching as core skill scoring.
+        Fully dynamic — works for any domain/field.
         """
         ats_keywords = parsed_jd.ats_keywords or []
         if not ats_keywords:
-            # JD didn't surface ATS keywords — can't evaluate domain, be neutral
-            return 60
+            return 60  # JD has no ATS keywords — neutral
 
         user_skill_list = _flatten_user_skills(user_profile.skills)
         if not user_skill_list:
-            # User hasn't populated skills yet — neutral, not penalised
             logger.info("domain_industry: no user skills found, returning neutral 50")
-            return 50
+            return 50  # New user — neutral, not penalised
 
         user_normalised = [_normalise_skill(s) for s in user_skill_list]
-
-        matched = sum(
-            1 for kw in ats_keywords
-            if _skill_match(kw, user_normalised)
-        )
+        matched = sum(1 for kw in ats_keywords if _skill_match(kw, user_normalised))
         pct = matched / len(ats_keywords)
 
         logger.info(
@@ -262,35 +290,45 @@ class ScoringService:
     def _score_location(
         self, location_type: str, user_preferences: UserPreferences
     ) -> int:
-        """Score location fit 0-100."""
+        """
+        Score location fit 0-100.
+
+        Reads location_preferences keys exactly as PreferencesPage saves them:
+          { remote: bool, hybrid: bool, onsite: bool, cities: [...] }
+
+        (Previous bug: was reading remote_only / hybrid_ok / onsite_ok which
+        never existed in the DB, so all lookups returned the default value.)
+        """
         if not user_preferences or not user_preferences.location_preferences:
             return 80
 
-        loc_prefs = user_preferences.location_preferences
-        if not isinstance(loc_prefs, dict):
+        loc = user_preferences.location_preferences
+        if not isinstance(loc, dict):
             return 80
 
-        remote_only = loc_prefs.get("remote_only", False)
-        hybrid_ok   = loc_prefs.get("hybrid_ok", True)
-        onsite_ok   = loc_prefs.get("onsite_ok", False)
-        loc_lower   = (location_type or "unknown").lower()
+        # Read the correct keys saved by PreferencesPage
+        remote_ok = loc.get("remote",  False)
+        hybrid_ok = loc.get("hybrid",  False)
+        onsite_ok = loc.get("onsite",  False)
+
+        # If nothing is checked at all, treat as flexible
+        if not remote_ok and not hybrid_ok and not onsite_ok:
+            return 80
+
+        loc_lower = (location_type or "unknown").lower()
 
         if loc_lower == "remote":
-            return 100
+            return 100 if remote_ok else (40 if not hybrid_ok and not onsite_ok else 50)
         if loc_lower == "hybrid":
-            return 100 if hybrid_ok else (50 if not remote_only else 30)
+            return 100 if hybrid_ok else (60 if remote_ok else 30)
         if loc_lower in ("onsite", "in-person", "in person"):
-            return 80 if onsite_ok else (40 if not remote_only else 10)
-        return 70  # Unknown — give benefit of the doubt
+            return 100 if onsite_ok else (30 if not hybrid_ok else 40)
+        return 70  # Unknown location type — benefit of the doubt
 
     def _score_compensation(
         self, salary_range: Optional[Any], user_preferences: UserPreferences
     ) -> int:
-        """Score compensation fit 0-100.
-
-        Returns 50 (neutral) when the JD has no salary data — no penalty
-        for not disclosing range.
-        """
+        """Score compensation fit 0-100. Returns 50 when JD has no salary data."""
         if not salary_range:
             return 50
 
@@ -301,7 +339,7 @@ class ScoringService:
             return 50
 
         if not user_preferences or not user_preferences.salary_min_usd:
-            return 75  # salary exists but no user threshold → good sign
+            return 75  # Salary exists but no user threshold — good sign
 
         user_min = user_preferences.salary_min_usd
 
@@ -333,7 +371,6 @@ class ScoringService:
         parsed_jd: ParsedJD,
         user_profile: Optional[UserProfile] = None,
     ) -> str:
-        """Generate actionable human-readable rationale."""
         parts = [f"Overall fit score: {score}/100"]
 
         csm = breakdown.get("core_skill_match", 0)
@@ -367,13 +404,13 @@ class ScoringService:
         elif dom >= 70:
             parts.append("Reasonable domain overlap")
         elif dom <= 30:
-            parts.append("Low domain overlap with your skill set")
+            parts.append("Low domain overlap — job may be outside your current skill set")
 
         loc = breakdown.get("location_fit", 0)
         if loc == 100:
             parts.append("Perfect location match")
         elif loc <= 30:
-            parts.append("Location mismatch")
+            parts.append("Location mismatch with your preferences")
 
         comp = breakdown.get("compensation", 0)
         if comp == 50:
@@ -381,6 +418,12 @@ class ScoringService:
         elif comp >= 75:
             parts.append("Compensation meets expectations")
         elif comp == 25:
-            parts.append("Compensation below target")
+            parts.append("Compensation below your minimum target")
+
+        sen = breakdown.get("seniority_alignment", 0)
+        if sen >= 100:
+            parts.append("Seniority level is a great match")
+        elif sen <= 40:
+            parts.append("Seniority mismatch — role may be too junior or too senior")
 
         return ". ".join(parts) + "."

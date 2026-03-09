@@ -6,11 +6,8 @@ from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Salary values below this are almost certainly bad parses (hourly rates,
-# per-diem figures, $k values that weren't normalised, etc.).
-# We treat them as "unknown" and skip the salary constraint rather than
-# hard-rejecting what could be a perfectly good job.
-MIN_CREDIBLE_SALARY = 10_000  # $10k / year
+# Salary values below this are almost certainly bad parses.
+MIN_CREDIBLE_SALARY = 10_000
 
 
 class RulesEngine:
@@ -19,9 +16,7 @@ class RulesEngine:
     def check_constraints(self, parsed_jd: ParsedJD, user_preferences: UserPreferences):
         """
         Returns (is_allowed: bool, rejection_reason: str | None).
-        Only rejects when we are CONFIDENT the job fails a hard constraint.
-        Ambiguous / low-quality parsed values are treated as 'unknown' and
-        allowed through so the scoring dimensions can handle them.
+        Only rejects when CONFIDENT the job fails a hard constraint.
         """
 
         # ── Visa / citizenship ────────────────────────────────────────────────
@@ -35,28 +30,32 @@ class RulesEngine:
                     ):
                         return False, f"Job requires {flag} but your visa status is {user_preferences.visa_status}"
 
-        # ── Location (remote-only) ────────────────────────────────────────────
+        # ── Location (remote-only hard constraint) ────────────────────────────
+        # Reads the correct key saved by PreferencesPage: 'remote' not 'remote_only'.
+        # Only hard-rejects if user explicitly wants remote-only (remote=True AND
+        # hybrid=False AND onsite=False) and the job is definitely onsite.
         if user_preferences.location_preferences:
             loc = user_preferences.location_preferences
-            if isinstance(loc, dict) and loc.get("remote_only", False):
-                if parsed_jd.location_type.value not in ("Remote", "Unknown"):
-                    return False, "You require remote but this job is not remote."
+            if isinstance(loc, dict):
+                remote_ok = loc.get("remote", False)
+                hybrid_ok = loc.get("hybrid", False)
+                onsite_ok = loc.get("onsite", False)
+                # Only hard-reject if user is remote-only AND job is confirmed onsite
+                user_remote_only = remote_ok and not hybrid_ok and not onsite_ok
+                if user_remote_only:
+                    jd_loc = parsed_jd.location_type.value if parsed_jd.location_type else "Unknown"
+                    if jd_loc not in ("Remote", "Unknown"):
+                        return False, "You require remote work but this job is not remote."
 
         # ── Salary floor ──────────────────────────────────────────────────────
-        # Only apply if:
-        #   1. User has set a minimum salary
-        #   2. The job has a parseable max salary
-        #   3. That max salary is >= MIN_CREDIBLE_SALARY (not a bad parse)
         if user_preferences.salary_min_usd and parsed_jd.salary_range:
             job_max = parsed_jd.salary_range.max
             if job_max is not None:
                 if job_max < MIN_CREDIBLE_SALARY:
-                    # Looks like a parsing artifact (e.g. $100 instead of $100k).
-                    # Log a warning but DO NOT reject the job.
                     logger.warning(
                         f"Ignoring suspicious salary max ${job_max:.0f} "
                         f"(below credibility threshold ${MIN_CREDIBLE_SALARY:,}) — "
-                        "treating as unknown and allowing through."
+                        "treating as unknown."
                     )
                 elif job_max < user_preferences.salary_min_usd:
                     return (
