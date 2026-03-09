@@ -11,29 +11,92 @@ import EmptyState from '../components/common/EmptyState'
 /* ── Search modal ────────────────────────────────────────────── */
 function SearchModal({ onClose, onSuccess, api }) {
   const [form, setForm] = useState({
-    keywords: 'Senior GenAI Engineer',
-    location: 'Dallas, TX',
-    work_type: 'remote,hybrid',
+    keywords:    '',
+    location:    '',
+    work_type:   'remote,hybrid',
     max_results: 10,
   })
-  const [loading, setLoading] = useState(false)
-  const [result,  setResult]  = useState(null)
+  const [loading,      setLoading]      = useState(false)
+  const [prefLoading,  setPrefLoading]  = useState(true)
+  const [result,       setResult]       = useState(null)
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
+
+  /* Load user profile + preferences to pre-fill the form */
+  useEffect(() => {
+    let cancelled = false
+    async function loadDefaults() {
+      try {
+        const [profile, prefs] = await Promise.allSettled([
+          api.get('/profile'),
+          api.get('/preferences'),
+        ])
+
+        if (cancelled) return
+
+        setForm(prev => {
+          const next = { ...prev }
+
+          // Keywords — first confirmed role, fallback to first suggested role
+          if (profile.status === 'fulfilled' && profile.value?.core_roles?.length) {
+            next.keywords = profile.value.core_roles[0]
+          }
+
+          if (prefs.status === 'fulfilled' && prefs.value) {
+            const p = prefs.value
+
+            // Location — prefer first city in preferences, else country
+            const locPrefs = p.location_preferences || {}
+            if (locPrefs.cities?.length) {
+              next.location = locPrefs.cities[0]
+            } else if (locPrefs.country) {
+              next.location = locPrefs.country
+            } else {
+              next.location = 'United States'
+            }
+
+            // Work type — derive from location preference flags
+            const remoteOk  = locPrefs.remote_only  ?? false
+            const hybridOk  = locPrefs.hybrid_ok    ?? true
+            const onsiteOk  = locPrefs.onsite_ok    ?? false
+            if (remoteOk && !hybridOk && !onsiteOk) {
+              next.work_type = 'remote'
+            } else if (!remoteOk && hybridOk && !onsiteOk) {
+              next.work_type = 'hybrid'
+            } else if (!remoteOk && !hybridOk && onsiteOk) {
+              next.work_type = 'onsite'
+            } else {
+              next.work_type = 'remote,hybrid'   // sensible default when mixed
+            }
+          }
+
+          return next
+        })
+      } catch (_) {
+        // Leave defaults — not a fatal error
+      } finally {
+        if (!cancelled) setPrefLoading(false)
+      }
+    }
+    loadDefaults()
+    return () => { cancelled = true }
+  }, [api])
 
   const search = async () => {
     setLoading(true)
     setResult(null)
     try {
       const params = new URLSearchParams({
-        keywords:     form.keywords,
-        location:     form.location,
-        work_type:    form.work_type,
-        max_results:  form.max_results,
-        auto_parse:   true,
+        keywords:    form.keywords,
+        location:    form.location,
+        work_type:   form.work_type,
+        max_results: form.max_results,
+        auto_parse:  true,
       })
       const data = await api.post(`/jobs/search?${params}`)
       setResult(data)
-      if ((data.ingested ?? 0) > 0 || (data.reparsed ?? 0) > 0 || (data.parsed ?? 0) > 0) {
+      // Always refresh the catalog on a successful search — even when all
+      // returned jobs are duplicates (ingested=0), they're already in the DB.
+      if (!data.error) {
         onSuccess()
       }
     } catch (e) {
@@ -52,45 +115,58 @@ function SearchModal({ onClose, onSuccess, api }) {
           <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-xl leading-none">×</button>
         </div>
 
-        <div className="space-y-4">
-          <div><label className="label">Keywords</label>
-            <input className="input" value={form.keywords} onChange={set('keywords')} /></div>
-          <div><label className="label">Location</label>
-            <input className="input" value={form.location} onChange={set('location')} /></div>
-          <div>
-            <label className="label">Work Type</label>
-            <select className="input" value={form.work_type} onChange={set('work_type')}>
-              <option value="remote,hybrid">Remote + Hybrid</option>
-              <option value="remote">Remote only</option>
-              <option value="hybrid">Hybrid only</option>
-              <option value="onsite">Onsite</option>
-            </select>
-          </div>
-          <div>
-            <label className="label">Max Results</label>
-            <select className="input" value={form.max_results} onChange={set('max_results')}>
-              {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} jobs</option>)}
-            </select>
-          </div>
-
-          {result && (
-            <div className={`text-sm px-3 py-2 rounded-lg ${
-              result.error
-                ? 'bg-red-950 border border-red-500/30 text-red-400'
-                : 'bg-emerald-950 border border-emerald-500/30 text-emerald-300'
-            }`}>
-              {result.error
-                ? `Error: ${result.error}`
-                : `✓ Fetched ${result.total_fetched ?? 0} · Ingested ${result.ingested ?? 0} · Parsed ${result.parsed ?? 0}`
-              }
+        {prefLoading ? (
+          <div className="flex justify-center py-8"><Spinner size="md" /></div>
+        ) : (
+          <div className="space-y-4">
+            <div>
+              <label className="label">Keywords</label>
+              <input className="input" value={form.keywords} onChange={set('keywords')}
+                placeholder="e.g. Senior GenAI Engineer" />
+              <p className="text-xs text-slate-500 mt-1">Pre-filled from your confirmed role</p>
             </div>
-          )}
+            <div>
+              <label className="label">Location</label>
+              <input className="input" value={form.location} onChange={set('location')}
+                placeholder="e.g. Dallas, TX" />
+              <p className="text-xs text-slate-500 mt-1">Pre-filled from your location preferences</p>
+            </div>
+            <div>
+              <label className="label">Work Type</label>
+              <select className="input" value={form.work_type} onChange={set('work_type')}>
+                <option value="remote,hybrid">Remote + Hybrid</option>
+                <option value="remote">Remote only</option>
+                <option value="hybrid">Hybrid only</option>
+                <option value="onsite">Onsite</option>
+              </select>
+              <p className="text-xs text-slate-500 mt-1">Pre-filled from your work preferences</p>
+            </div>
+            <div>
+              <label className="label">Max Results</label>
+              <select className="input" value={form.max_results} onChange={set('max_results')}>
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} jobs</option>)}
+              </select>
+            </div>
 
-          <button onClick={search} disabled={loading}
-            className="btn-primary w-full flex items-center justify-center gap-2 py-2.5">
-            {loading ? <><Spinner size="sm" /> Searching…</> : <><Search size={15} /> Search & Ingest</>}
-          </button>
-        </div>
+            {result && (
+              <div className={`text-sm px-3 py-2 rounded-lg ${
+                result.error
+                  ? 'bg-red-950 border border-red-500/30 text-red-400'
+                  : 'bg-emerald-950 border border-emerald-500/30 text-emerald-300'
+              }`}>
+                {result.error
+                  ? `Error: ${result.error}`
+                  : `✓ Fetched ${result.total_fetched ?? 0} · Ingested ${result.ingested ?? 0} · Parsed ${result.parsed ?? 0}`
+                }
+              </div>
+            )}
+
+            <button onClick={search} disabled={loading || !form.keywords}
+              className="btn-primary w-full flex items-center justify-center gap-2 py-2.5">
+              {loading ? <><Spinner size="sm" /> Searching…</> : <><Search size={15} /> Search & Ingest</>}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -148,9 +224,8 @@ export default function JobsPage() {
     setScoring(true)
     try {
       const r = await api.post('/jobs/score-all')
-      // Safely handle any response shape the backend returns
-      const newlyScored   = r.scored              ?? r.new_scored      ?? 0
-      const alreadyScored = r.skipped_already_scored ?? r.already_scored  ?? r.skipped ?? 0
+      const newlyScored   = r.scored                 ?? r.new_scored     ?? 0
+      const alreadyScored = r.skipped_already_scored ?? r.already_scored ?? r.skipped ?? 0
       setToast({ message: `Scored ${newlyScored} new jobs. Skipped ${alreadyScored} already scored.` })
       await loadJobs()
     } catch (e) {
