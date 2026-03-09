@@ -1,16 +1,22 @@
-"""Resume tailoring service using Azure OpenAI."""
+"""
+Resume tailoring service using Azure OpenAI.
+Guardrail: LLM may only SELECT and REPHRASE from the approved bullet library.
+It cannot invent new claims, metrics, employers, or tools.
+"""
 
 import os
+import json
 from typing import Dict, Any, List
 from openai import AzureOpenAI
 from packages.schemas.jd_schema import ParsedJD
+from packages.bullet_library import get_bullets_by_tags, get_all_bullets
 from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class ResumeTailor:
-    """Tailor resume bullets to a specific job using Azure OpenAI."""
+    """Tailor resume bullets to a specific job — guardrailed by approved bullet library."""
 
     def __init__(self):
         self.client = AzureOpenAI(
@@ -26,47 +32,62 @@ class ResumeTailor:
         parsed_jd: ParsedJD,
         user_profile: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Generate tailored resume bullets for a specific job.
-
-        Args:
-            resume_text: Full resume text content
-            parsed_jd: Parsed job description
-            user_profile: User profile with skills and roles
+        """
+        Generate tailored resume output using ONLY approved bullets from the library.
+        LLM selects the most relevant bullets and may rephrase to incorporate ATS keywords,
+        but cannot invent new facts, tools, employers, or metrics.
 
         Returns:
-            Dict with tailored_bullets, keywords_added, summary
+            summary: tailored professional summary
+            bullets: list of selected+tailored bullet strings
+            bullet_ids_used: IDs from the library (audit trail)
+            keywords_incorporated: ATS keywords woven in
         """
         must_haves = ", ".join(parsed_jd.must_have_skills[:8])
-        nice_to_haves = ", ".join(parsed_jd.nice_to_have_skills[:5])
-        ats_keywords = ", ".join(parsed_jd.ats_keywords[:10])
+        ats_keywords = ", ".join(parsed_jd.ats_keywords[:12])
 
-        prompt = f"""You are an expert resume writer and ATS optimization specialist.
+        # Retrieve most relevant bullets from library based on JD skills
+        all_jd_terms = parsed_jd.must_have_skills + parsed_jd.nice_to_have_skills + parsed_jd.ats_keywords
+        relevant_bullets = get_bullets_by_tags(all_jd_terms)
 
-Job to tailor for:
-- Role: {parsed_jd.role}
-- Seniority: {parsed_jd.seniority}
-- Must-have skills: {must_haves}
-- Nice-to-have skills: {nice_to_haves}
-- ATS keywords to include: {ats_keywords}
+        # If few matches, fall back to all bullets
+        if len(relevant_bullets) < 5:
+            relevant_bullets = get_all_bullets()
 
-Candidate's current resume:
-{resume_text[:3000]}
+        # Build bullet library prompt context
+        bullet_library_text = "\n".join(
+            f"[{b['id']}] {b['text']}" for b in relevant_bullets[:14]
+        )
 
-Task: Generate 5-7 tailored, ATS-optimized resume bullet points that:
-1. Use STAR format (Situation/Task, Action, Result) where possible
-2. Naturally incorporate the ATS keywords above
-3. Quantify impact with metrics where possible
-4. Highlight the most relevant experience for THIS specific role
-5. Start each bullet with a strong action verb
+        prompt = f"""You are an expert resume writer. Your job is to select and tailor resume bullets for a specific job.
 
-Also provide:
-- A 2-3 sentence tailored professional summary for this role
-- List of ATS keywords successfully incorporated
+CRITICAL GUARDRAIL: You may ONLY use bullets from the approved library below.
+You may rephrase bullets to incorporate ATS keywords, but you CANNOT:
+- Invent new tools, technologies, or employers
+- Add metrics or numbers not present in the original bullet
+- Claim experience the candidate does not have
+- Combine bullets in a way that creates false claims
 
-Return as JSON with this structure:
+=== APPROVED BULLET LIBRARY ===
+{bullet_library_text}
+
+=== JOB REQUIREMENTS ===
+Role: {parsed_jd.role}
+Seniority: {parsed_jd.seniority}
+Must-have skills: {must_haves}
+ATS keywords to weave in: {ats_keywords}
+
+=== TASK ===
+1. Select the 5-7 most relevant bullets from the library above
+2. Rephrase each selected bullet to naturally incorporate the ATS keywords where truthful
+3. Write a 2-3 sentence tailored professional summary
+4. Return the exact bullet IDs you selected
+
+Return JSON:
 {{
-  "summary": "tailored professional summary here",
-  "bullets": ["bullet 1", "bullet 2", ...],
+  "summary": "tailored professional summary",
+  "bullets": ["tailored bullet 1", "tailored bullet 2", ...],
+  "bullet_ids_used": ["VR-001", "VR-005", ...],
   "keywords_incorporated": ["keyword1", "keyword2", ...]
 }}"""
 
@@ -74,16 +95,15 @@ Return as JSON with this structure:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are an expert resume writer. Always return valid JSON."},
+                    {"role": "system", "content": "You are an expert resume writer. ONLY use bullets from the provided library. Return valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.4,
-                max_tokens=1000,
+                temperature=0.3,
+                max_tokens=1200,
             )
-            import json
             result = json.loads(response.choices[0].message.content)
-            logger.info(f"Resume tailored for role: {parsed_jd.role}")
+            logger.info(f"Resume tailored for role: {parsed_jd.role} | bullets used: {result.get('bullet_ids_used', [])}")
             return result
         except Exception as e:
             logger.error(f"Resume tailoring failed: {e}")

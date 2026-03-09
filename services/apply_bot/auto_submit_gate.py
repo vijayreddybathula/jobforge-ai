@@ -1,37 +1,53 @@
-"""Auto-submit gating logic."""
+"""Auto-submit gate — hard rules before any automated submission."""
 
-from typing import Dict, Any
-from packages.database.models import JobRaw, JobScore
+from typing import Tuple, Optional, Any
 from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
 
+AUTO_SUBMIT_MIN_SCORE = 85
+AUTO_SUBMIT_ALLOWED_PLATFORMS = ["greenhouse", "lever"]
+MAX_APPLICATIONS_PER_COMPANY_PER_MONTH = 2
+
 
 class AutoSubmitGate:
-    """Gate for auto-submit eligibility."""
+    """Enforce hard constraints before allowing automated job submission."""
 
-    def is_eligible(self, job: JobRaw, score: JobScore, platform: str):
-        """Check if job is eligible for auto-submit.
-
-        Args:
-            job: Job record
-            score: Job score
-            platform: Application platform
-
-        Returns:
-            Tuple of (is_eligible, reason)
+    def check(
+        self,
+        score: int,
+        verdict: str,
+        job_url: str,
+        user_preferences: Optional[Any] = None,
+    ) -> Tuple[bool, str]:
         """
-        # Score must be >= 85
-        if score.total_score < 85:
-            return False, f"Score {score.total_score} is below auto-submit threshold (85)"
+        Returns (can_auto_submit, reason).
+        All conditions must pass for auto-submit to be eligible.
+        In practice, we always stop_before_submit=True — this is for future use.
+        """
+        # 1. Score threshold
+        if score < AUTO_SUBMIT_MIN_SCORE:
+            return False, f"Score {score} below auto-submit threshold of {AUTO_SUBMIT_MIN_SCORE}"
 
-        # Platform must be reliable
-        eligible_platforms = ["greenhouse", "lever"]
-        if platform.lower() not in eligible_platforms:
-            return False, f"Platform {platform} is not eligible for auto-submit"
+        # 2. Verdict must be ELIGIBLE_AUTO_SUBMIT
+        if verdict != "ELIGIBLE_AUTO_SUBMIT":
+            return False, f"Verdict '{verdict}' not eligible for auto-submit"
 
-        # Verdict must be ELIGIBLE_AUTO_SUBMIT
-        if score.verdict != "ELIGIBLE_AUTO_SUBMIT":
-            return False, f"Verdict {score.verdict} is not eligible for auto-submit"
+        # 3. Platform must be Greenhouse or Lever (not LinkedIn/generic)
+        platform = self._detect_platform(job_url)
+        if platform not in AUTO_SUBMIT_ALLOWED_PLATFORMS:
+            return False, f"Platform '{platform}' not supported for auto-submit (only {AUTO_SUBMIT_ALLOWED_PLATFORMS})"
 
-        return True, "Eligible for auto-submit"
+        logger.info(f"Auto-submit gate PASSED: score={score}, verdict={verdict}, platform={platform}")
+        return True, "All auto-submit conditions met"
+
+    def _detect_platform(self, url: str) -> str:
+        url_lower = url.lower()
+        if "greenhouse" in url_lower:
+            return "greenhouse"
+        elif "lever" in url_lower:
+            return "lever"
+        elif "linkedin" in url_lower:
+            return "linkedin"
+        else:
+            return "generic"
