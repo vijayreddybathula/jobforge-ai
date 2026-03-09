@@ -35,7 +35,6 @@ async def get_profile(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get user profile."""
     profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
     if not profile:
         raise HTTPException(
@@ -57,7 +56,6 @@ async def create_profile(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Manually create user profile."""
     existing = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
     if existing:
         raise HTTPException(
@@ -89,7 +87,6 @@ async def update_profile(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update user profile."""
     profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
@@ -119,44 +116,63 @@ async def build_profile_from_resume(
 ):
     """
     Auto-build UserProfile from an analyzed resume.
-    Uses LLM-extracted skills + confirmed role matches already in DB.
-    Call this after POST /resume/analyze/{resume_id}.
+
+    Reads from resume.parsed_data which is populated by POST /resume/analyze.
+    Keys present: core_skills, technologies, current_role, years_of_experience,
+                  industry_domain, seniority_level.
+
+    Skills are merged and categorized into buckets for the scoring engine.
+    _flatten_user_skills() in scoring_service merges all buckets back into a
+    flat list for matching, so the bucket names are labels only — they don't
+    affect scoring accuracy.
     """
-    # Get resume
     resume = db.query(Resume).filter(
         Resume.resume_id == resume_id,
-        Resume.user_id == user_id
+        Resume.user_id == user_id,
     ).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found.")
 
-    # Get confirmed role matches (fall back to all suggested if none confirmed)
+    # ── Core roles: confirmed > all suggested ─────────────────────────────────
     role_matches = db.query(RoleMatch).filter(RoleMatch.resume_id == resume_id).all()
     confirmed_roles = [r.role_title for r in role_matches if r.is_confirmed]
-    all_roles = [r.role_title for r in role_matches]
-    core_roles = confirmed_roles if confirmed_roles else all_roles
+    all_roles       = [r.role_title for r in role_matches]
+    core_roles      = confirmed_roles if confirmed_roles else all_roles
 
-    # Extract skills from parsed_data stored during upload
-    parsed_data = resume.parsed_data or {}
-    raw_skills = parsed_data.get("skills", [])
+    # ── Skills from LLM analysis stored by POST /resume/analyze ──────────────
+    parsed_data  = resume.parsed_data or {}
+    core_skills  = parsed_data.get("core_skills",  [])   # e.g. ["Python", "RAG", ...]
+    technologies = parsed_data.get("technologies", [])   # e.g. ["LangChain", "FastAPI", ...]
 
-    # Also pull from LLM analysis if stored (set by role_extractor in analyze step)
-    # parsed_data may contain: core_skills, technologies from the LLM response
-    core_skills = parsed_data.get("core_skills", [])
-    technologies = parsed_data.get("technologies", [])
+    # Deduplicate across both lists
+    all_skills = list({s for s in (core_skills + technologies) if s})
 
-    # Merge and categorize skills
-    all_skills = list(set(raw_skills + core_skills + technologies))
+    if not all_skills:
+        logger.warning(
+            f"build_profile_from_resume: no skills found in resume.parsed_data for {resume_id}. "
+            "Did you call POST /resume/analyze first?"
+        )
 
-    # Categorize into known buckets for scoring engine
-    skill_keywords = {
-        "languages": ["python", "java", "typescript", "javascript", "go", "rust", "c++", "scala"],
-        "frameworks": ["fastapi", "springboot", "react", "langchain", "langgraph", "pydantic", "asyncio"],
-        "genai": ["azure openai", "openai", "gpt-4", "rag", "llm", "embeddings", "vector", "assistants api",
-                  "responses api", "multi-agent", "pgvector", "pdfplumber", "prompt"],
-        "infra": ["docker", "kubernetes", "redis", "celery", "github actions", "ci/cd", "azure", "aws",
-                  "kafka", "elasticsearch", "apim", "sonarqube"],
-        "data": ["postgresql", "pgvector", "mysql", "mongodb", "cosmosdb", "aws rds", "azure blob"],
+    # ── Categorize into labelled buckets ─────────────────────────────────────
+    # Buckets are cosmetic labels — scoring flattens them all back into one list.
+    # Any skill not matched goes into 'other'; non-tech users will have most
+    # of their skills there, which is fine.
+    skill_keywords: Dict[str, List[str]] = {
+        "languages":  ["python", "java", "typescript", "javascript", "go", "rust",
+                       "c++", "scala", "ruby", "swift", "kotlin", "r"],
+        "frameworks": ["fastapi", "springboot", "react", "langchain", "langgraph",
+                       "pydantic", "asyncio", "flask", "django", "express", "nextjs",
+                       "angular", "vue"],
+        "genai":      ["azure openai", "openai", "gpt-4", "gpt", "rag", "llm",
+                       "embeddings", "vector", "assistants api", "responses api",
+                       "multi-agent", "pgvector", "prompt", "fine-tun",
+                       "hugging face", "transformers", "semantic kernel"],
+        "infra":      ["docker", "kubernetes", "redis", "celery", "github actions",
+                       "ci/cd", "azure", "aws", "gcp", "kafka", "elasticsearch",
+                       "terraform", "ansible", "jenkins"],
+        "data":       ["postgresql", "pgvector", "mysql", "mongodb", "cosmosdb",
+                       "aws rds", "azure blob", "snowflake", "databricks", "spark",
+                       "pandas", "numpy", "sql"],
     }
 
     categorized: Dict[str, List[str]] = {k: [] for k in skill_keywords}
@@ -176,14 +192,20 @@ async def build_profile_from_resume(
     if uncategorized:
         categorized["other"] = uncategorized
 
-    # Upsert UserProfile
+    # Remove empty buckets to keep the profile clean
+    categorized = {k: v for k, v in categorized.items() if v}
+
+    # ── Upsert UserProfile ────────────────────────────────────────────────────
     profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
     if profile:
         profile.core_roles = core_roles
-        profile.skills = categorized
+        profile.skills     = categorized
         db.commit()
         db.refresh(profile)
-        logger.info(f"Profile updated from resume {resume_id} for user {user_id}")
+        logger.info(
+            f"Profile updated from resume {resume_id}: "
+            f"{len(core_roles)} roles, {len(all_skills)} skills"
+        )
     else:
         profile = UserProfile(
             user_id=user_id,
@@ -194,7 +216,10 @@ async def build_profile_from_resume(
         db.add(profile)
         db.commit()
         db.refresh(profile)
-        logger.info(f"Profile built from resume {resume_id} for user {user_id}")
+        logger.info(
+            f"Profile built from resume {resume_id}: "
+            f"{len(core_roles)} roles, {len(all_skills)} skills"
+        )
 
     return UserProfileResponse(
         profile_id=profile.profile_id,

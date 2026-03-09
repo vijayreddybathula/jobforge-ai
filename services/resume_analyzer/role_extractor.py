@@ -25,11 +25,9 @@ def _extract_text(file_bytes: bytes, file_type: str) -> str:
 
     if ft == "pdf":
         try:
-            import pypdf  # pypdf >= 3.x
+            import pypdf
             reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-            return "\n".join(
-                page.extract_text() or "" for page in reader.pages
-            )
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
         except ImportError:
             pass
         try:
@@ -41,7 +39,6 @@ def _extract_text(file_bytes: bytes, file_type: str) -> str:
     elif ft in ("docx", "doc"):
         try:
             import docx2txt
-            # docx2txt.process() accepts a file-like object
             return docx2txt.process(io.BytesIO(file_bytes))
         except ImportError:
             pass
@@ -52,7 +49,6 @@ def _extract_text(file_bytes: bytes, file_type: str) -> str:
         except ImportError:
             pass
 
-    # Last resort: try to decode as UTF-8 text (works for plain-.txt uploads)
     try:
         return file_bytes.decode("utf-8", errors="replace")
     except Exception:
@@ -63,14 +59,27 @@ class RoleExtractor:
     """Extract role information from a resume using an LLM."""
 
     def __init__(self):
-        api_key    = os.getenv("AZURE_OPENAPI_KEY")
-        endpoint   = os.getenv("AZURE_OPENAPI_ENDPOINT")
-        api_version = os.getenv("AZURE_OPENAPI_VERSION", "2024-06-01-preview")
+        # Support both AZURE_OPENAI_* (canonical) and AZURE_OPENAPI_* (legacy typo).
+        # New deployments should use AZURE_OPENAI_*; existing containers with the
+        # old typo-named vars still work via the fallback.
+        api_key     = os.getenv("AZURE_OPENAI_KEY")     or os.getenv("AZURE_OPENAPI_KEY")
+        endpoint    = os.getenv("AZURE_OPENAI_ENDPOINT") or os.getenv("AZURE_OPENAPI_ENDPOINT")
+        api_version = (
+            os.getenv("AZURE_OPENAI_VERSION")
+            or os.getenv("AZURE_OPENAPI_VERSION")
+            or "2024-06-01-preview"
+        )
 
         if not api_key:
-            raise ValueError("AZURE_OPENAPI_KEY environment variable not set")
+            raise ValueError(
+                "Azure OpenAI key not set. "
+                "Set AZURE_OPENAI_KEY (or legacy AZURE_OPENAPI_KEY) env var."
+            )
         if not endpoint:
-            raise ValueError("AZURE_OPENAPI_ENDPOINT environment variable not set")
+            raise ValueError(
+                "Azure OpenAI endpoint not set. "
+                "Set AZURE_OPENAI_ENDPOINT (or legacy AZURE_OPENAPI_ENDPOINT) env var."
+            )
 
         self.client = AzureOpenAI(
             api_key=api_key,
@@ -78,22 +87,20 @@ class RoleExtractor:
             api_version=api_version,
         )
         self.cache = ResumeAnalysisCache()
-        self.model = os.getenv("AZURE_OPENAPI_DEPLOYMENT", "GPT-4")
+        self.model = (
+            os.getenv("AZURE_OPENAI_DEPLOYMENT")
+            or os.getenv("AZURE_OPENAPI_DEPLOYMENT")
+            or "GPT-4"
+        )
 
     # ------------------------------------------------------------------ #
-    #  Public API called by resume.py                                      #
+    #  Public API                                                          #
     # ------------------------------------------------------------------ #
 
     def extract_roles(self, file_bytes: bytes, file_type: str) -> List[Dict[str, Any]]:
         """
         Extract suggested roles from raw resume bytes.
-
-        Args:
-            file_bytes: Raw file content (PDF or DOCX).
-            file_type:  'pdf' | 'docx' | 'doc'
-
-        Returns:
-            List of dicts with keys: role, confidence, reasoning
+        Returns list of dicts: [{role, confidence, reasoning}]
         """
         resume_text = _extract_text(file_bytes, file_type)
         if not resume_text.strip():
@@ -110,7 +117,6 @@ class RoleExtractor:
 
         raw = self._call_llm(resume_text)
 
-        # Normalise to the shape resume.py expects: [{role, confidence, reasoning}]
         roles: List[Dict[str, Any]] = []
         for item in raw.get("suggested_roles", []):
             roles.append({
@@ -126,9 +132,7 @@ class RoleExtractor:
     def analyze_resume(
         self, file_bytes: bytes, file_type: str
     ) -> ResumeAnalysisResponse:
-        """
-        Full analysis returning a structured ResumeAnalysisResponse.
-        """
+        """Full analysis returning a structured ResumeAnalysisResponse."""
         resume_text  = _extract_text(file_bytes, file_type)
         content_hash = hashlib.sha256(file_bytes).hexdigest()
         cache_key    = f"analysis:{content_hash}"
@@ -202,7 +206,7 @@ Return a JSON object with this exact structure:
     "years_of_experience": <integer>,
     "core_skills": ["skill1", "skill2"],
     "technologies": ["tech1", "tech2"],
-    "industry_domain": "Industry (e.g. Software, Finance)",
+    "industry_domain": "Industry (e.g. Software, Finance, Healthcare)",
     "seniority_level": "Intern|Junior|Mid|Senior|Staff|Principal|Unknown",
     "suggested_roles": [
         {{
