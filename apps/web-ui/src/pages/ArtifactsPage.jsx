@@ -29,14 +29,19 @@ export default function ArtifactsPage() {
   const [toast, setToast] = useState(null)
 
   useEffect(() => {
+    // Fetch job directly by ID instead of loading all 100 jobs
     Promise.all([
-      api.get(`/jobs/?limit=100`).then(d => d.jobs?.find(j => j.job_id === id)),
+      api.get(`/jobs/${id}`).catch(() => null),
       api.get(`/jobs/${id}/artifacts`).catch(() => null),
     ]).then(([job, arts]) => {
-      setJobTitle(job ? `${job.parsed_role || job.title} — ${job.company}` : 'Job')
+      if (job) {
+        const role = job.parsed_role || job.title || 'Job'
+        const company = job.company || ''
+        setJobTitle(company ? `${role} — ${company}` : role)
+      }
       if (arts?.artifacts && Object.keys(arts.artifacts).length > 0) setArtifacts(arts.artifacts)
     }).finally(() => setLoading(false))
-  }, [id])
+  }, [id, api])
 
   const generate = async () => {
     setGenerating(true)

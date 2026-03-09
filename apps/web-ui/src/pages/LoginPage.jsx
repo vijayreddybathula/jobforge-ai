@@ -12,6 +12,7 @@ export default function LoginPage() {
   const [showPass, setShowPass] = useState(false)
   const [error, setError]       = useState('')
   const [loading, setLoading]   = useState(false)
+
   // Forgot-password flow
   const [forgotMode, setForgotMode]     = useState(false)
   const [resetEmail, setResetEmail]     = useState('')
@@ -33,7 +34,6 @@ export default function LoginPage() {
       const data = await res.json()
 
       if (!res.ok) {
-        // Surface the exact API error message (covers wrong-password, inactive, etc.)
         const msg = typeof data.detail === 'string'
           ? data.detail
           : Array.isArray(data.detail)
@@ -58,14 +58,17 @@ export default function LoginPage() {
     setResetError('')
     setResetLoading(true)
     try {
-      // Calls POST /users/forgot-password — backend sends reset instructions.
-      // If endpoint doesn't exist yet we still show a success message (security best-practice:
-      // never reveal whether the email exists).
-      await fetch('/api/v1/users/forgot-password', {
+      const res = await fetch('/api/v1/users/forgot-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: resetEmail }),
       })
+      // Security best-practice: always show success regardless of whether email exists.
+      // But surface real network/server errors (5xx) to the user.
+      if (res.status >= 500) {
+        setResetError('Server error — please try again later.')
+        return
+      }
       setResetSent(true)
     } catch {
       setResetError('Network error — try again.')

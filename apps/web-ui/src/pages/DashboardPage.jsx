@@ -47,9 +47,9 @@ export default function DashboardPage() {
         const resumes = await api.get('/resume/')
         s.resume = Array.isArray(resumes) && resumes.length > 0
         if (s.resume) {
-          // Only check the first / most recent resume to avoid N requests
           const firstId = resumes[0].resume_id
-          const rolesData = await api.get(`/resume/roles/${firstId}`)
+          // Correct endpoint: GET /resume/{resume_id}/roles
+          const rolesData = await api.get(`/resume/${firstId}/roles`)
           s.roles = rolesData.roles?.some(r => r.is_confirmed) ?? false
         }
       } catch {}
@@ -60,10 +60,10 @@ export default function DashboardPage() {
         s.prefs = true
       } catch {}
 
-      // 3. Recent scored jobs (single request)
+      // 3. Recent scored jobs
       try {
-        const jobs   = await api.get('/jobs/?page=1&limit=10')
-        const scored = (jobs.jobs || []).filter(j => j.score !== null)
+        const data   = await api.get('/jobs/?page=1&limit=10')
+        const scored = (data.jobs || []).filter(j => j.score !== null && j.score !== undefined)
         setRecentScores(scored.slice(0, 5))
       } catch {}
 
@@ -71,7 +71,7 @@ export default function DashboardPage() {
     }
 
     load()
-  }, []) // empty deps — api is stable, runs once on mount
+  }, []) // empty deps — api ref is stable, runs once on mount
 
   const statCards = [
     {
@@ -98,7 +98,7 @@ export default function DashboardPage() {
     {
       label: 'Avg Score',
       value: recentScores.length
-        ? Math.round(recentScores.reduce((a, j) => a + j.score, 0) / recentScores.length)
+        ? Math.round(recentScores.reduce((a, j) => a + (j.score ?? 0), 0) / recentScores.length)
         : '—',
       sub:   'across scored',
       icon:  Star,
@@ -135,7 +135,7 @@ export default function DashboardPage() {
           <h2 className="font-semibold text-slate-200 mb-4">Onboarding Checklist</h2>
           <div className="divide-y divide-surface-border">
             <CheckItem done={status.resume} label="Upload your resume"       to="/resume" />
-            <CheckItem done={status.roles}  label="Confirm target roles"     to={status.resume ? `/resume` : '/resume'} />
+            <CheckItem done={status.roles}  label="Confirm target roles"     to="/resume" />
             <CheckItem done={status.prefs}  label="Set job preferences"      to="/preferences" />
             <CheckItem done={recentScores.length > 0} label="Search & score jobs" to="/jobs" />
             <CheckItem
