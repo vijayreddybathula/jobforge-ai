@@ -51,7 +51,6 @@ export default function JobDetailPage() {
 
     const load = async () => {
       try {
-        // Single direct lookup — no more scanning through a paginated list
         const [jobData, parsedData, scoreData] = await Promise.all([
           api.get(`/jobs/${id}`),
           api.get(`/jobs/${id}/parsed`).catch(() => null),
@@ -75,7 +74,6 @@ export default function JobDetailPage() {
       const s = await api.post(`/jobs/${id}/score`)
       setScore(s)
       setJob(j => j ? { ...j, score: s.total_score, verdict: s.verdict } : j)
-      // If this was NOT_SCORED, also refresh the parsed JD (auto-parse may have run)
       if (!parsed) {
         const p = await api.get(`/jobs/${id}/parsed`).catch(() => null)
         setParsed(p?.parsed_jd ?? null)
@@ -115,10 +113,14 @@ export default function JobDetailPage() {
     </div>
   )
 
-  const scoreData      = score || job
-  const breakdown      = scoreData?.breakdown || {}
+  // score object (from POST /score) takes precedence; fall back to what
+  // came embedded in the job row from GET /jobs/{id}
+  const totalScore     = score?.total_score ?? job.score ?? null
+  const verdict        = score?.verdict     ?? job.verdict ?? 'NOT_SCORED'
+  // Guard against null — Object.entries(null) throws a TypeError → blank screen
+  const breakdown      = (score?.breakdown != null ? score.breakdown : job.breakdown) ?? {}
   const cleanBreakdown = Object.entries(breakdown).filter(([k]) => !k.startsWith('_'))
-  const verdict        = scoreData?.verdict || job.verdict
+  const rationale      = score?.rationale ?? job.rationale ?? null
 
   /* ── Render ──────────────────────────────────────────────── */
   return (
@@ -130,7 +132,7 @@ export default function JobDetailPage() {
       {/* Header */}
       <div className="card">
         <div className="flex items-start gap-4">
-          <ScoreCircle score={scoreData?.total_score ?? scoreData?.score} size="lg" />
+          <ScoreCircle score={totalScore} size="lg" />
           <div className="flex-1 min-w-0">
             <h1 className="text-xl font-bold text-slate-100 leading-tight">
               {parsed?.role || job.parsed_role || job.title}
@@ -169,7 +171,7 @@ export default function JobDetailPage() {
       </div>
 
       <div className="grid md:grid-cols-2 gap-6">
-        {/* Score breakdown */}
+        {/* Score breakdown — only rendered after scoring */}
         {cleanBreakdown.length > 0 && (
           <div className="card">
             <h2 className="font-semibold text-slate-200 mb-4">Score Breakdown</h2>
@@ -189,8 +191,8 @@ export default function JobDetailPage() {
                 </div>
               ))}
             </div>
-            {scoreData?.rationale && (
-              <p className="text-xs text-slate-500 mt-4 leading-relaxed">{scoreData.rationale}</p>
+            {rationale && (
+              <p className="text-xs text-slate-500 mt-4 leading-relaxed">{rationale}</p>
             )}
           </div>
         )}
@@ -205,13 +207,11 @@ export default function JobDetailPage() {
                 <div><span className="text-slate-500">Seniority </span><span className="text-slate-200 font-medium">{parsed.seniority}</span></div>
               </div>
 
-              {(parsed.salary_min || parsed.salary_max || parsed.salary_range) && (
+              {(parsed.salary_range?.min || parsed.salary_range?.max) && (
                 <div>
                   <span className="text-slate-500">Salary </span>
                   <span className="text-slate-200 font-medium">
-                    {parsed.salary_range
-                      ? parsed.salary_range
-                      : `$${(parsed.salary_min || 0).toLocaleString()} – $${(parsed.salary_max || 0).toLocaleString()}`}
+                    ${(parsed.salary_range.min || 0).toLocaleString()} – ${(parsed.salary_range.max || 0).toLocaleString()}
                   </span>
                 </div>
               )}
@@ -253,11 +253,22 @@ export default function JobDetailPage() {
             </div>
           </div>
         ) : (
-          /* Not yet parsed — show a prompt to score which auto-parses */
+          /* Not yet parsed */
           <div className="card flex flex-col items-center justify-center py-10 text-center">
             <p className="text-slate-400 text-sm mb-3">This job hasn't been parsed yet.</p>
             <button onClick={handleScore} disabled={scoring} className="btn-primary flex items-center gap-2">
               {scoring ? <><Spinner size="sm" /> Parsing & Scoring…</> : <><Zap size={15} /> Score to Parse</>}
+            </button>
+          </div>
+        )}
+
+        {/* Unscored prompt — shown when job is parsed but not yet scored */}
+        {parsed && totalScore === null && (
+          <div className="card flex flex-col items-center justify-center py-10 text-center">
+            <p className="text-slate-400 text-sm mb-1">Job parsed but not yet scored.</p>
+            <p className="text-slate-500 text-xs mb-4">Hit Score to see how well this matches your profile.</p>
+            <button onClick={handleScore} disabled={scoring} className="btn-secondary flex items-center gap-2">
+              {scoring ? <><Spinner size="sm" /> Scoring…</> : <><Zap size={15} /> Score Now</>}
             </button>
           </div>
         )}
