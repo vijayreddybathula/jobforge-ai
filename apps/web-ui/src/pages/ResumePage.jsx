@@ -6,18 +6,27 @@ import { Upload, FileText, Trash2, ChevronRight, RefreshCw, AlertCircle } from '
 import Spinner from '../components/common/Spinner'
 import Toast from '../components/common/Toast'
 
+const ACCEPTED_TYPES = {
+  'application/pdf': ['.pdf'],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+  // Some browsers report .docx under these types too
+  'application/msword': ['.doc'],
+  'application/octet-stream': ['.pdf', '.docx'],
+}
+
 export default function ResumePage() {
   const api      = useApi()
   const navigate = useNavigate()
   const [resumes,   setResumes]   = useState([])
   const [loading,   setLoading]   = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
   const [analyzing, setAnalyzing] = useState(null)
   const [toast,     setToast]     = useState(null)
 
   const showToast = (message, type = 'success') => setToast({ message, type })
 
-  /* ── load list ─────────────────────────────────────────────────── */
+  /* ── Load resumes ──────────────────────────────────────────── */
   const loadResumes = useCallback(async () => {
     try {
       const data = await api.get('/resume/')
@@ -31,59 +40,52 @@ export default function ResumePage() {
 
   useEffect(() => { loadResumes() }, [loadResumes])
 
-  /* ── upload ─────────────────────────────────────────────────────── */
-  const onDrop = useCallback(async (accepted, rejected) => {
-    // Show a clear message if the file type was rejected by the dropzone
-    if (rejected?.length) {
-      showToast('Only PDF or DOCX files are accepted.', 'error')
-      return
-    }
-    const file = accepted[0]
-    if (!file) return
-
-    // Client-side size guard (10 MB)
-    if (file.size > 10 * 1024 * 1024) {
-      showToast('File is too large. Max 10 MB.', 'error')
-      return
-    }
-
+  /* ── Upload ─────────────────────────────────────────────────── */
+  const doUpload = useCallback(async (file) => {
+    setUploadError('')
     setUploading(true)
     try {
       const result = await api.upload('/resume/upload', file)
       if (result.duplicate) {
-        showToast('This resume is already uploaded (identical content).', 'error')
+        showToast('This exact resume is already uploaded.', 'error')
       } else {
-        showToast('Resume uploaded! Click Analyze to extract roles.')
+        showToast(`Resume uploaded! v${result.version || ''}`)
+        await loadResumes()
       }
-      await loadResumes()
     } catch (e) {
-      // Surface the exact server error message
-      showToast(e.message || 'Upload failed. Is the API running?', 'error')
+      // Surface the real error so the user knows what went wrong
+      const msg = e.message || 'Upload failed. Check file type (PDF/DOCX) and size (max 10 MB).'
+      setUploadError(msg)
+      showToast(msg, 'error')
     } finally {
       setUploading(false)
     }
   }, [api, loadResumes])
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const onDrop = useCallback((accepted, rejected) => {
+    if (rejected?.length) {
+      const reason = rejected[0]?.errors?.[0]?.message || 'File rejected.'
+      setUploadError(`File not accepted: ${reason}. Please use PDF or DOCX, max 10 MB.`)
+      return
+    }
+    if (accepted?.[0]) doUpload(accepted[0])
+  }, [doUpload])
+
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
-    // Accept both MIME types and extensions so macOS + Windows both work
-    accept: {
-      'application/pdf': ['.pdf'],
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-      'application/msword': ['.doc'],
-    },
+    accept: ACCEPTED_TYPES,
     maxFiles: 1,
-    // Disable the built-in size check — we handle it ourselves above
-    // so we can show a nicer message
-    maxSize: undefined,
+    maxSize: 10 * 1024 * 1024,   // 10 MB
+    noClick: false,
+    noKeyboard: false,
   })
 
-  /* ── analyze ─────────────────────────────────────────────────── */
+  /* ── Analyze ────────────────────────────────────────────────── */
   const handleAnalyze = async (resumeId) => {
     setAnalyzing(resumeId)
     try {
       await api.post(`/resume/analyze/${resumeId}`)
-      showToast('Analysis complete! Confirm your target roles.')
+      showToast('Analysis complete! Confirm your roles.')
       navigate(`/resume/${resumeId}/roles`)
     } catch (e) {
       showToast(e.message, 'error')
@@ -92,19 +94,19 @@ export default function ResumePage() {
     }
   }
 
-  /* ── delete ─────────────────────────────────────────────────── */
+  /* ── Delete ─────────────────────────────────────────────────── */
   const handleDelete = async (resumeId) => {
     if (!confirm('Delete this resume? This cannot be undone.')) return
     try {
       await api.delete(`/resume/${resumeId}`)
       showToast('Resume deleted.')
-      await loadResumes()
+      setResumes(prev => prev.filter(r => r.resume_id !== resumeId))
     } catch (e) {
       showToast(e.message, 'error')
     }
   }
 
-  /* ── render ─────────────────────────────────────────────────── */
+  /* ── Render ─────────────────────────────────────────────────── */
   return (
     <div className="max-w-3xl space-y-8">
       <div>
@@ -130,18 +132,15 @@ export default function ResumePage() {
                   {r.has_parsed_data ? ' · ✓ Analyzed' : ' · Not analyzed'}
                 </p>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={() => navigate(`/resume/${r.resume_id}/roles`)}
-                  className="btn-secondary btn-sm flex items-center gap-1.5"
-                >
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <button onClick={() => navigate(`/resume/${r.resume_id}/roles`)}
+                  className="btn-secondary btn-sm flex items-center gap-1.5">
                   View Roles <ChevronRight size={13} />
                 </button>
                 <button
                   onClick={() => handleAnalyze(r.resume_id)}
                   disabled={analyzing === r.resume_id}
-                  className="btn-secondary btn-sm flex items-center gap-1.5"
-                >
+                  className="btn-secondary btn-sm flex items-center gap-1.5">
                   {analyzing === r.resume_id ? <Spinner size="sm" /> : <RefreshCw size={13} />}
                   {r.has_parsed_data ? 'Re-analyze' : 'Analyze'}
                 </button>
@@ -160,10 +159,20 @@ export default function ResumePage() {
           {resumes.length > 0 ? 'Upload New Version' : 'Upload Resume'}
         </h2>
 
+        {/* Error banner */}
+        {uploadError && (
+          <div className="mb-3 flex items-start gap-2 bg-red-950 border border-red-500/30 text-red-400 text-sm px-4 py-3 rounded-lg">
+            <AlertCircle size={16} className="shrink-0 mt-0.5" />
+            <span>{uploadError}</span>
+          </div>
+        )}
+
         <div
           {...getRootProps()}
           className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors ${
-            isDragActive ? 'border-brand bg-brand/5' : 'border-surface-border hover:border-slate-600'
+            isDragActive
+              ? 'border-brand bg-brand/5'
+              : 'border-surface-border hover:border-slate-600'
           }`}
         >
           <input {...getInputProps()} />
@@ -179,7 +188,14 @@ export default function ResumePage() {
                 {isDragActive ? 'Drop it here!' : 'Drop your resume here'}
               </p>
               <p className="text-sm text-slate-500">PDF or DOCX · Max 10 MB</p>
-              <button type="button" className="btn-secondary btn-sm mt-4">Browse files</button>
+              {/* Explicit button as fallback for any browser click issues */}
+              <button
+                type="button"
+                onClick={e => { e.stopPropagation(); open() }}
+                className="btn-secondary btn-sm mt-4"
+              >
+                Browse files
+              </button>
             </>
           )}
         </div>
@@ -187,7 +203,7 @@ export default function ResumePage() {
         {resumes.length > 0 && (
           <p className="text-xs text-slate-500 mt-2 flex items-center gap-1">
             <AlertCircle size={12} />
-            Uploading a new file creates a new version. Existing applications are not affected.
+            Uploading creates a new version. Existing applications are not affected.
           </p>
         )}
       </div>
