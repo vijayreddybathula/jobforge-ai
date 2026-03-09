@@ -9,14 +9,18 @@ import Toast from '../components/common/Toast'
 import EmptyState from '../components/common/EmptyState'
 
 /**
- * Derive the JSearch work_type string from saved location_preferences.
- *
- * PreferencesPage saves: { remote: bool, hybrid: bool, onsite: bool, cities: [] }
- * JSearch accepts:       "remote" | "hybrid" | "onsite" | comma-separated combo
- *
- * We build a comma-separated string of the enabled types so JSearch
- * returns the broadest relevant set for this user.
+ * JSearch date_posted options.
+ * Note: JSearch does NOT support a 1-hour window — "today" is the finest
+ * granularity available and covers roughly the last 24 hours.
  */
+const DATE_POSTED_OPTIONS = [
+  { value: 'today',  label: 'Last 24 hours' },
+  { value: '3days',  label: 'Last 3 days'   },
+  { value: 'week',   label: 'Last 7 days'   },  // default
+  { value: 'month',  label: 'Last 30 days'  },
+  { value: 'any',    label: 'Any time'       },
+]
+
 function deriveWorkType(locPrefs) {
   if (!locPrefs) return 'remote,hybrid'
   const types = []
@@ -32,6 +36,7 @@ function SearchModal({ onClose, onSuccess, api }) {
     keywords:    '',
     location:    '',
     work_type:   'remote,hybrid',
+    date_posted: 'week',   // sensible default — fresh jobs, not stale ones
     max_results: 10,
   })
   const [loading,     setLoading]     = useState(false)
@@ -39,14 +44,6 @@ function SearchModal({ onClose, onSuccess, api }) {
   const [result,      setResult]      = useState(null)
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
 
-  /**
-   * On mount: load profile + preferences and pre-fill the form.
-   *
-   * keywords  ← user_profile.core_roles (confirmed roles from resume analysis)
-   * location  ← user_preferences.location_preferences.cities[0]
-   *             or first city if multiple, else "United States" as fallback
-   * work_type ← derived from location_preferences.remote / hybrid / onsite flags
-   */
   useEffect(() => {
     let cancelled = false
     async function loadDefaults() {
@@ -55,40 +52,22 @@ function SearchModal({ onClose, onSuccess, api }) {
           api.get('/profile'),
           api.get('/preferences'),
         ])
-
         if (cancelled) return
-
         setForm(prev => {
           const next = { ...prev }
-
-          // ── Keywords: all confirmed roles joined — broadest coverage ──────
-          if (
-            profileResult.status === 'fulfilled' &&
-            profileResult.value?.core_roles?.length
-          ) {
-            // Use the first role as primary keyword — most focused results.
-            // User can edit before searching if they want a different query.
+          if (profileResult.status === 'fulfilled' && profileResult.value?.core_roles?.length) {
             next.keywords = profileResult.value.core_roles[0]
           }
-
-          // ── Location & work type from saved preferences ───────────────────
           if (prefsResult.status === 'fulfilled' && prefsResult.value) {
-            const prefs    = prefsResult.value
-            const locPrefs = prefs.location_preferences || {}
-
-            // Location: first saved city, fallback to "United States"
-            const cities = locPrefs.cities || []
-            next.location = cities.length ? cities[0] : 'United States'
-
-            // Work type: read the actual saved boolean flags
-            // Keys are: remote, hybrid, onsite  (set by PreferencesPage)
+            const locPrefs = prefsResult.value.location_preferences || {}
+            const cities   = locPrefs.cities || []
+            next.location  = cities.length ? cities[0] : 'United States'
             next.work_type = deriveWorkType(locPrefs)
           }
-
           return next
         })
       } catch (_) {
-        // Non-fatal — user can still edit fields manually
+        // non-fatal
       } finally {
         if (!cancelled) setPrefLoading(false)
       }
@@ -105,16 +84,13 @@ function SearchModal({ onClose, onSuccess, api }) {
         keywords:    form.keywords,
         location:    form.location,
         work_type:   form.work_type,
+        date_posted: form.date_posted,
         max_results: form.max_results,
         auto_parse:  true,
       })
       const data = await api.post(`/jobs/search?${params}`)
       setResult(data)
-      // Always refresh the catalog on any successful search response —
-      // even when all jobs are duplicates (ingested=0) they're in the DB.
-      if (!data.error) {
-        onSuccess()
-      }
+      if (!data.error) onSuccess()
     } catch (e) {
       setResult({ error: e.message })
     } finally { setLoading(false) }
@@ -139,33 +115,41 @@ function SearchModal({ onClose, onSuccess, api }) {
               <label className="label">Keywords</label>
               <input className="input" value={form.keywords} onChange={set('keywords')}
                 placeholder="e.g. Senior GenAI Engineer" />
-              <p className="text-xs text-slate-500 mt-1">
-                From your confirmed role — edit freely
-              </p>
+              <p className="text-xs text-slate-500 mt-1">From your confirmed role — edit freely</p>
             </div>
 
             <div>
               <label className="label">Location</label>
               <input className="input" value={form.location} onChange={set('location')}
                 placeholder="e.g. Dallas, TX" />
-              <p className="text-xs text-slate-500 mt-1">
-                From your location preferences — edit freely
-              </p>
+              <p className="text-xs text-slate-500 mt-1">From your location preferences — edit freely</p>
             </div>
 
-            <div>
-              <label className="label">Work Type</label>
-              <select className="input" value={form.work_type} onChange={set('work_type')}>
-                <option value="remote,hybrid">Remote + Hybrid</option>
-                <option value="remote">Remote only</option>
-                <option value="hybrid">Hybrid only</option>
-                <option value="onsite">Onsite</option>
-                <option value="remote,hybrid,onsite">Any</option>
-              </select>
-              <p className="text-xs text-slate-500 mt-1">
-                Derived from your work preferences
-              </p>
+            {/* Two-column row: Work Type + Posted Within */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">Work Type</label>
+                <select className="input" value={form.work_type} onChange={set('work_type')}>
+                  <option value="remote,hybrid">Remote + Hybrid</option>
+                  <option value="remote">Remote only</option>
+                  <option value="hybrid">Hybrid only</option>
+                  <option value="onsite">Onsite</option>
+                  <option value="remote,hybrid,onsite">Any</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="label">Posted Within</label>
+                <select className="input" value={form.date_posted} onChange={set('date_posted')}>
+                  {DATE_POSTED_OPTIONS.map(o => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
             </div>
+            <p className="text-xs text-slate-600 -mt-2">
+              "Last 24 hours" is the finest window JSearch supports — no 1-hour option exists.
+            </p>
 
             <div>
               <label className="label">Max Results</label>
@@ -214,7 +198,6 @@ export default function JobsPage() {
   const [total,      setTotal]      = useState(0)
   const [apiError,   setApiError]   = useState('')
 
-  /* ── Load ───────────────────────────────────────────────── */
   const loadJobs = useCallback(async () => {
     setLoading(true)
     setApiError('')
@@ -229,7 +212,6 @@ export default function JobsPage() {
 
   useEffect(() => { loadJobs() }, [loadJobs])
 
-  /* ── Score one ─────────────────────────────────────────────── */
   const handleScoreOne = async (jobId) => {
     setScoringId(jobId)
     try {
@@ -245,7 +227,6 @@ export default function JobsPage() {
     } finally { setScoringId(null) }
   }
 
-  /* ── Score all ─────────────────────────────────────────────── */
   const handleScoreAll = async () => {
     setScoring(true)
     try {
@@ -259,7 +240,6 @@ export default function JobsPage() {
     } finally { setScoring(false) }
   }
 
-  /* ── Filter / search ─────────────────────────────────────────── */
   const FILTERS = [
     { id: 'all',                  label: 'All' },
     { id: 'NOT_SCORED',           label: 'Unscored' },
@@ -279,10 +259,8 @@ export default function JobsPage() {
     return true
   })
 
-  /* ── Render ────────────────────────────────────────────────── */
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Job Pipeline</h1>
@@ -299,7 +277,6 @@ export default function JobsPage() {
         </div>
       </div>
 
-      {/* Filters */}
       <div className="flex items-center gap-2 flex-wrap">
         <div className="flex gap-1 flex-wrap">
           {FILTERS.map(f => (
@@ -319,14 +296,12 @@ export default function JobsPage() {
         </div>
       </div>
 
-      {/* API error */}
       {apiError && (
         <div className="bg-red-950 border border-red-500/30 text-red-400 text-sm px-4 py-3 rounded-lg">
           Failed to load jobs: {apiError}. Is the API running?
         </div>
       )}
 
-      {/* Job list */}
       {loading ? (
         <div className="flex justify-center py-20"><Spinner size="lg" /></div>
       ) : filtered.length === 0 ? (
@@ -365,6 +340,11 @@ export default function JobsPage() {
                   <div className="flex gap-1.5 mt-1.5 flex-wrap">
                     <span className="text-xs text-slate-500 bg-surface px-2 py-0.5 rounded border border-surface-border">{job.source}</span>
                     <span className="text-xs text-slate-500 bg-surface px-2 py-0.5 rounded border border-surface-border">{job.parse_status}</span>
+                    {job.posted_at && (
+                      <span className="text-xs text-slate-600 bg-surface px-2 py-0.5 rounded border border-surface-border">
+                        {new Date(job.posted_at).toLocaleDateString()}
+                      </span>
+                    )}
                   </div>
                   {job.rationale && (
                     <p className="text-xs text-slate-500 mt-2 line-clamp-2">{job.rationale}</p>
