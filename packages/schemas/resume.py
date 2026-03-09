@@ -32,7 +32,7 @@ class RoleMatch(BaseModel):
 class ResumeAnalysisResponse(BaseModel):
     """Response schema for resume analysis."""
 
-    resume_id: UUID
+    resume_id: Optional[UUID] = None  # Set by caller after LLM analysis
     current_role: Optional[str] = None
     years_of_experience: Optional[int] = None
     core_skills: List[str] = []
