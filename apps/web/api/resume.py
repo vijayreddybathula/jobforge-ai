@@ -28,30 +28,20 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/resume", tags=["resume"])
 role_extractor = RoleExtractor()
 
-# MIME types accepted from browsers for PDF and DOCX.
-# Safari/macOS reports .docx as application/octet-stream or application/zip,
-# so we accept those too and rely on the file extension as fallback.
 ACCEPTED_MIME = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/msword",
-    # Safari / some OS file pickers send these for .docx
     "application/octet-stream",
     "application/zip",
-    # Generic binary — allow and validate by extension
     "binary/octet-stream",
-    "",          # occasionally empty string from some browsers
+    "",
 }
 
 ACCEPTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
 
 
 def _validate_file(file: UploadFile) -> str:
-    """
-    Returns normalised extension ('pdf' or 'docx').
-    Raises HTTPException 400 if the file is not acceptable.
-    We validate by MIME *or* extension — whichever confirms the type.
-    """
     mime = (file.content_type or "").lower().split(";")[0].strip()
     filename = file.filename or ""
     ext = ""
@@ -88,14 +78,13 @@ class RoleConfirmRequest(BaseModel):
     confirmed_roles: List[str]
 
 
-# ── List resumes for current user ─────────────────────────────────────────────
+# ── List resumes ──────────────────────────────────────────────────────────────
 
 @router.get("/", summary="List all resumes for current user")
 async def list_resumes(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Returns only the authenticated user's resumes. Never returns another user's."""
     resumes = (
         db.query(Resume)
         .filter(Resume.user_id == current_user_id)
@@ -123,10 +112,6 @@ async def upload_resume(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Upload a resume. Deduplicates by content hash *per user*.
-    Different users may upload the same file without conflict.
-    """
     file_ext = _validate_file(file)
 
     content = await file.read()
@@ -135,7 +120,6 @@ async def upload_resume(
 
     content_hash = hashlib.sha256(content).hexdigest()
 
-    # ── Per-user dedup check (same user, same file = duplicate) ──────────────
     existing = (
         db.query(Resume)
         .filter(Resume.user_id == current_user_id, Resume.content_hash == content_hash)
@@ -149,11 +133,8 @@ async def upload_resume(
             "file_name": existing.file_name,
         }
 
-    # ── Version number for this user ──────────────────────────────────────────
     version = db.query(Resume).filter(Resume.user_id == current_user_id).count() + 1
 
-    # ── Azure Blob upload ─────────────────────────────────────────────────────
-    # Blob path is scoped under user_id so different users never overwrite each other.
     blob_name = f"{current_user_id}/{content_hash}.{file_ext}"
     file_path  = blob_name
 
@@ -179,9 +160,6 @@ async def upload_resume(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        # This can only happen if the DB schema still has a global UNIQUE on
-        # content_hash (i.e. before migration to per-user unique index).
-        # We detect it and surface a clear error rather than a 500.
         err_str = str(e.orig).lower()
         if "content_hash" in err_str and "unique" in err_str:
             raise HTTPException(
@@ -214,7 +192,16 @@ async def analyze_resume(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Extract role matches from resume using Azure OpenAI. Ownership-checked."""
+    """
+    Extract role matches AND full skill profile from resume using Azure OpenAI.
+
+    The LLM returns: current_role, years_of_experience, core_skills,
+    technologies, industry_domain, seniority_level, suggested_roles.
+
+    We persist ALL of that into resume.parsed_data so that
+    POST /profile/build-from-resume can pull skills without needing
+    to call the LLM again.
+    """
     resume = (
         db.query(Resume)
         .filter(Resume.resume_id == resume_id, Resume.user_id == current_user_id)
@@ -233,26 +220,53 @@ async def analyze_resume(
     else:
         raise HTTPException(status_code=500, detail="Azure Blob Storage not configured.")
 
-    role_matches = role_extractor.extract_roles(file_bytes, resume.file_type)
+    # analyze_resume returns the full structured LLM response including
+    # core_skills, technologies, years_of_experience, seniority_level etc.
+    analysis = role_extractor.analyze_resume(file_bytes, resume.file_type)
 
+    # ── Persist the full LLM output into resume.parsed_data ──────────────────
+    # This is the key step that was missing before. Without it,
+    # build_profile_from_resume had nothing to read and skills stayed empty,
+    # causing core_skill_match = 0 and a low total score.
+    resume.parsed_data = {
+        "current_role":         analysis.current_role,
+        "years_of_experience":  analysis.years_of_experience,
+        "core_skills":          analysis.core_skills,
+        "technologies":         analysis.technologies,
+        "industry_domain":      analysis.industry_domain,
+        "seniority_level":      analysis.seniority_level,
+    }
+
+    # ── Persist role suggestions ──────────────────────────────────────────────
     db.query(RoleMatch).filter(RoleMatch.resume_id == resume_id).delete()
-
-    for match in role_matches:
-        rm = RoleMatch(
+    for match in analysis.suggested_roles:
+        db.add(RoleMatch(
             resume_id=resume_id,
-            role_title=match["role"],
-            confidence_score=match.get("confidence", 80),
+            role_title=match.role_title,
+            confidence_score=match.confidence_score,
             is_confirmed=False,
-        )
-        db.add(rm)
+        ))
 
     db.commit()
-    logger.info(f"Resume analyzed: {resume_id}, {len(role_matches)} roles found")
+    db.refresh(resume)
+    logger.info(
+        f"Resume analyzed: {resume_id}, {len(analysis.suggested_roles)} roles found, "
+        f"{len(analysis.core_skills)} core skills, {len(analysis.technologies)} technologies"
+    )
 
     return {
-        "resume_id": str(resume_id),
-        "roles_found": len(role_matches),
-        "message": "Analysis complete. Call GET /resume/roles/{id} to review.",
+        "resume_id":            str(resume_id),
+        "roles_found":          len(analysis.suggested_roles),
+        "core_skills_found":    len(analysis.core_skills),
+        "technologies_found":   len(analysis.technologies),
+        "years_of_experience":  analysis.years_of_experience,
+        "seniority_level":      analysis.seniority_level,
+        "industry_domain":      analysis.industry_domain,
+        "message": (
+            "Analysis complete. "
+            "Call GET /resume/roles/{id} to review suggested roles, "
+            "confirm them, then POST /profile/build-from-resume/{id}."
+        ),
     }
 
 
@@ -264,7 +278,6 @@ async def get_roles(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get role suggestions for resume. Ownership-checked."""
     resume = (
         db.query(Resume)
         .filter(Resume.resume_id == resume_id, Resume.user_id == current_user_id)
@@ -278,10 +291,10 @@ async def get_roles(
         "resume_id": str(resume_id),
         "roles": [
             {
-                "role_match_id": str(r.role_match_id),
-                "role_title": r.role_title,
+                "role_match_id":   str(r.role_match_id),
+                "role_title":      r.role_title,
                 "confidence_score": r.confidence_score,
-                "is_confirmed": r.is_confirmed,
+                "is_confirmed":    r.is_confirmed,
             }
             for r in roles
         ],
@@ -296,7 +309,6 @@ async def confirm_roles(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Mark selected roles as confirmed. Ownership-checked."""
     resume = (
         db.query(Resume)
         .filter(Resume.resume_id == body.resume_id, Resume.user_id == current_user_id)
@@ -321,10 +333,10 @@ async def confirm_roles(
     db.commit()
 
     return {
-        "resume_id": str(body.resume_id),
-        "confirmed_count": len(confirmed),
-        "confirmed_roles": [r.role_title for r in confirmed],
-        "next_step": f"POST /profile/build-from-resume/{body.resume_id}",
+        "resume_id":        str(body.resume_id),
+        "confirmed_count":  len(confirmed),
+        "confirmed_roles":  [r.role_title for r in confirmed],
+        "next_step":        f"POST /profile/build-from-resume/{body.resume_id}",
     }
 
 
@@ -336,7 +348,6 @@ async def delete_resume(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a resume and its role matches. Ownership strictly enforced."""
     resume = (
         db.query(Resume)
         .filter(Resume.resume_id == resume_id, Resume.user_id == current_user_id)
