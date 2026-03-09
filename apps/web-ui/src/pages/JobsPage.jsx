@@ -8,7 +8,7 @@ import Spinner from '../components/common/Spinner'
 import Toast from '../components/common/Toast'
 import EmptyState from '../components/common/EmptyState'
 
-/* ── Search modal ──────────────────────────────────────────────── */
+/* ── Search modal ────────────────────────────────────────────── */
 function SearchModal({ onClose, onSuccess, api }) {
   const [form, setForm] = useState({
     keywords: 'Senior GenAI Engineer',
@@ -96,7 +96,7 @@ function SearchModal({ onClose, onSuccess, api }) {
   )
 }
 
-/* ── Jobs page ─────────────────────────────────────────────────── */
+/* ── Jobs page ───────────────────────────────────────────────── */
 export default function JobsPage() {
   const api      = useApi()
   const navigate = useNavigate()
@@ -112,7 +112,7 @@ export default function JobsPage() {
   const [total,      setTotal]      = useState(0)
   const [apiError,   setApiError]   = useState('')
 
-  /* ── Load ──────────────────────────────────────────────────── */
+  /* ── Load ───────────────────────────────────────────────── */
   const loadJobs = useCallback(async () => {
     setLoading(true)
     setApiError('')
@@ -148,14 +148,17 @@ export default function JobsPage() {
     setScoring(true)
     try {
       const r = await api.post('/jobs/score-all')
-      setToast({ message: `Scored ${r.scored} new jobs. Skipped ${r.skipped_already_scored} already scored.` })
+      // Safely handle any response shape the backend returns
+      const newlyScored   = r.scored              ?? r.new_scored      ?? 0
+      const alreadyScored = r.skipped_already_scored ?? r.already_scored  ?? r.skipped ?? 0
+      setToast({ message: `Scored ${newlyScored} new jobs. Skipped ${alreadyScored} already scored.` })
       await loadJobs()
     } catch (e) {
       setToast({ message: e.message, type: 'error' })
     } finally { setScoring(false) }
   }
 
-  /* ── Filter / search ───────────────────────────────────────── */
+  /* ── Filter / search ─────────────────────────────────────────── */
   const FILTERS = [
     { id: 'all',                  label: 'All' },
     { id: 'NOT_SCORED',           label: 'Unscored' },
@@ -166,7 +169,8 @@ export default function JobsPage() {
   ]
 
   const filtered = jobs.filter(j => {
-    if (filter !== 'all' && j.verdict !== filter) return false
+    const verdict = j.verdict || (j.score == null ? 'NOT_SCORED' : null)
+    if (filter !== 'all' && verdict !== filter) return false
     if (search) {
       const q = search.toLowerCase()
       if (!`${j.title || ''} ${j.company || ''} ${j.parsed_role || ''}`.toLowerCase().includes(q)) return false

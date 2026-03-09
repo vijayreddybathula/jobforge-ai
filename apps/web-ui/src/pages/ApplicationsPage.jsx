@@ -5,6 +5,7 @@ import { BarChart2, ExternalLink } from 'lucide-react'
 import Spinner from '../components/common/Spinner'
 import Toast from '../components/common/Toast'
 import EmptyState from '../components/common/EmptyState'
+import VerdictBadge from '../components/jobs/VerdictBadge'
 
 const STAGES = ['phone_screen', 'onsite', 'offer', 'rejected', 'no_response']
 const STAGE_LABELS = {
@@ -15,11 +16,12 @@ const STAGE_LABELS = {
   no_response:  'No Response',
 }
 
-const STATUS_CLS = {
-  submitted: 'badge-apply',
-  started:   'badge-validate',
-  cancelled: 'badge-skip',
-  failed:    'badge-skip',
+// Map application status to a verdict-style key so we can reuse VerdictBadge
+const STATUS_VERDICT = {
+  submitted: 'ASSISTED_APPLY',
+  started:   'VALIDATE',
+  cancelled: 'SKIP',
+  failed:    'SKIP',
 }
 
 export default function ApplicationsPage() {
@@ -32,7 +34,7 @@ export default function ApplicationsPage() {
   const [apiError,     setApiError]     = useState('')
   const [toast,        setToast]        = useState(null)
 
-  /* ── Load ──────────────────────────────────────────────────── */
+  /* ── Load ──────────────────────────────────────────────── */
   useEffect(() => {
     const load = async () => {
       try {
@@ -50,7 +52,7 @@ export default function ApplicationsPage() {
     load()
   }, [api])
 
-  /* ── Record outcome ────────────────────────────────────────── */
+  /* ── Record outcome ─────────────────────────────────────────── */
   const recordOutcome = async (appId, stage) => {
     setRecording(`${appId}-${stage}`)
     try {
@@ -110,15 +112,8 @@ export default function ApplicationsPage() {
                     }{' · '}{app.apply_mode}
                   </p>
                 </div>
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border shrink-0 ${
-                  STATUS_CLS[app.status] === 'badge-apply'
-                    ? 'bg-emerald-900/40 text-emerald-400 border-emerald-500/30'
-                    : STATUS_CLS[app.status] === 'badge-validate'
-                      ? 'bg-amber-900/40 text-amber-400 border-amber-500/30'
-                      : 'bg-red-900/40 text-red-400 border-red-500/30'
-                }`}>
-                  {app.status.toUpperCase()}
-                </span>
+                {/* Reuse VerdictBadge instead of duplicating badge CSS */}
+                <VerdictBadge verdict={STATUS_VERDICT[app.status] || 'NOT_SCORED'} />
               </div>
 
               {app.status === 'submitted' && (
