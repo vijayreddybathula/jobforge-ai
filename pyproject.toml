@@ -55,6 +55,25 @@ types-redis = ">=4.6.0.11"
 types-PyYAML = ">=6.0.12.12"
 types-requests = ">=2.31.0"
 
+[tool.pytest.ini_options]
+# Discover all tests under tests/
+testpaths = ["tests"]
+# Recurse into subdirectories
+python_files  = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# asyncio mode
+asyncio_mode = "strict"
+# Suppress "unknown mark" warnings by registering all custom marks
+markers = [
+    "integration: marks tests as integration tests (may require external services)",
+    "unit: marks tests as unit tests (no external deps)",
+    "e2e: marks tests as end-to-end tests",
+    "slow: marks tests as slow-running",
+]
+# Short traceback for clean output
+addopts = "--tb=short -q"
+
 [tool.black]
 line-length = 100
 target-version = ['py311']
