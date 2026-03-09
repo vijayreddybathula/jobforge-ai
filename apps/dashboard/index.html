@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>JobForge AI Dashboard</title>
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Production React builds (not dev) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -97,23 +98,100 @@
     .input-group label { font-size: 12px; color: #64748b; }
     .input-group input, .input-group select, .input-group textarea { background: #0f1117; border: 1px solid #2d3748; border-radius: 8px; padding: 10px 12px; color: #e2e8f0; font-size: 14px; outline: none; width: 100%; }
     .input-group input:focus, .input-group textarea:focus { border-color: #6366f1; }
+    .auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .auth-card { background: #1a1f2e; border: 1px solid #2d3748; border-radius: 16px; padding: 32px; width: 100%; max-width: 400px; }
+    .auth-card h2 { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+    .auth-error { background: #1f1010; border: 1px solid #ef444433; color: #ef4444; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
 const API = 'http://localhost:8000/api/v1';
-const USER_ID = '9a27fa17-e08d-482a-957f-a4a0ed6ae33d';
-const HEADERS = { 'Content-Type': 'application/json', 'x-user-id': USER_ID };
+const SESSION_KEY = 'jf_session';
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
-const api = {
-  get: (path) => fetch(`${API}${path}`, { headers: HEADERS }).then(r => r.json()),
-  post: (path, body) => fetch(`${API}${path}`, { method: 'POST', headers: HEADERS, body: body ? JSON.stringify(body) : undefined }).then(r => r.json()),
-};
+// ── Auth helpers ──────────────────────────────────────────────────
+function getSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Date.now() - new Date(parsed.logged_in_at).getTime() > SESSION_TTL_MS) {
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return parsed;
+  } catch { return null; }
+}
+
+function saveSession(data) {
+  const s = { ...data, logged_in_at: new Date().toISOString() };
+  localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  return s;
+}
+
+function clearSession() { localStorage.removeItem(SESSION_KEY); }
+
+function makeHeaders(session) {
+  const h = { 'Content-Type': 'application/json' };
+  if (session?.user_id) h['x-user-id'] = session.user_id;
+  return h;
+}
 
 const scoreColor = (s) => s >= 85 ? '#6366f1' : s >= 75 ? '#10b981' : s >= 65 ? '#f59e0b' : '#ef4444';
 const scoreBg = (s) => s >= 85 ? '#0c1228' : s >= 75 ? '#0a1f12' : s >= 65 ? '#1a1508' : '#1f1010';
 
+// ── Login screen ──────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = React.useState('');
+  const [password, setPassword] = React.useState('');
+  const [error, setError] = React.useState('');
+  const [loading, setLoading] = React.useState(false);
+
+  const submit = async () => {
+    if (!email || !password) { setError('Email and password are required.'); return; }
+    setError('');
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/users/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const msg = typeof data.detail === 'string' ? data.detail : 'Login failed.';
+        setError(msg);
+        return;
+      }
+      onLogin(saveSession(data));
+    } catch { setError('Network error — is the API running on port 8000?'); }
+    finally { setLoading(false); }
+  };
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <h2>⚡ JobForge AI</h2>
+        <p style={{ color: '#64748b', fontSize: 13, marginBottom: 24 }}>Dev dashboard — sign in to continue</p>
+        {error && <div className="auth-error">{error}</div>}
+        <div className="input-group"><label>Email</label>
+          <input type="email" value={email} onChange={e => setEmail(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && submit()} autoFocus /></div>
+        <div className="input-group"><label>Password</label>
+          <input type="password" value={password} onChange={e => setPassword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && submit()} /></div>
+        <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }}
+          onClick={submit} disabled={loading}>
+          {loading ? 'Signing in...' : 'Sign In'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Shared components ──────────────────────────────────────────────
 function ScoreCircle({ score }) {
   if (!score) return <div className="score-circle" style={{ background: '#1a1f2e', color: '#475569' }}>—</div>;
   return (
@@ -124,25 +202,30 @@ function ScoreCircle({ score }) {
 }
 
 function VerdictBadge({ verdict }) {
-  const label = verdict === 'ELIGIBLE_AUTO_SUBMIT' ? 'AUTO' : verdict === 'ASSISTED_APPLY' ? 'APPLY' : verdict === 'NOT_SCORED' ? 'UNSCORE' : verdict;
+  const label = verdict === 'ELIGIBLE_AUTO_SUBMIT' ? 'AUTO' : verdict === 'ASSISTED_APPLY' ? 'APPLY' : verdict === 'NOT_SCORED' ? 'UNSCORED' : verdict;
   return <span className={`verdict-badge verdict-${verdict || 'NOT_SCORED'}`}>{label || 'NOT SCORED'}</span>;
 }
 
 function Toast({ msg, type, onClose }) {
-  React.useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, []);
+  React.useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
   return <div className={`toast ${type}`}>{msg}</div>;
 }
 
-function ArtifactModal({ job, score, onClose }) {
+// ── Artifact modal ─────────────────────────────────────────────────
+function ArtifactModal({ job, score, session, onClose }) {
   const [artifacts, setArtifacts] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
+  const headers = makeHeaders(session);
 
   const generate = async () => {
     setLoading(true);
-    const res = await fetch(`${API}/jobs/${job.job_id}/artifacts/generate?artifact_types=pitch&artifact_types=resume&artifact_types=answers`, { method: 'POST', headers: HEADERS });
-    const data = await res.json();
-    setArtifacts(data.artifacts);
-    setLoading(false);
+    try {
+      const res = await fetch(`${API}/jobs/${job.job_id}/artifacts/generate?artifact_types=pitch&artifact_types=resume&artifact_types=answers`,
+        { method: 'POST', headers });
+      const data = await res.json();
+      setArtifacts(data.artifacts);
+    } catch (e) { console.error('Artifact generation failed', e); }
+    finally { setLoading(false); }
   };
 
   return (
@@ -155,7 +238,6 @@ function ArtifactModal({ job, score, onClose }) {
           </div>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
-
         {!artifacts && (
           <div style={{ textAlign: 'center', padding: '20px 0' }}>
             <p style={{ color: '#64748b', marginBottom: 16, fontSize: 14 }}>Generate AI-powered pitch, tailored resume bullets, and application answers.</p>
@@ -164,27 +246,21 @@ function ArtifactModal({ job, score, onClose }) {
             </button>
           </div>
         )}
-
         {loading && <div className="loading"><div className="spinner"/><span>GPT-4 generating artifacts...</span></div>}
-
         {artifacts && (
           <>
             {artifacts.pitch && (
               <>
                 <div className="section-title">🎯 Recruiter Pitch</div>
-                <div className="artifact-section"><p className="artifact-text">{artifacts.pitch}</p></div>
+                <div className="artifact-section"><p className="artifact-text">{artifacts.pitch?.content || artifacts.pitch}</p></div>
               </>
             )}
-
             {artifacts.resume && (
               <>
                 <div className="section-title">📄 Tailored Resume</div>
                 <div className="artifact-section">
                   {artifacts.resume.summary && <p className="artifact-text" style={{ marginBottom: 12 }}>{artifacts.resume.summary}</p>}
                   {(artifacts.resume.bullets || []).map((b, i) => <div key={i} className="bullet-item">• {b}</div>)}
-                  {artifacts.resume.bullet_ids_used && (
-                    <div style={{ marginTop: 10, fontSize: 11, color: '#475569' }}>Source bullets: {artifacts.resume.bullet_ids_used.join(', ')}</div>
-                  )}
                 </div>
                 {artifacts.resume.keywords_incorporated?.length > 0 && (
                   <>
@@ -196,12 +272,11 @@ function ArtifactModal({ job, score, onClose }) {
                 )}
               </>
             )}
-
             {artifacts.answers && (
               <>
                 <div className="section-title">💬 Application Answers</div>
                 <div className="artifact-section">
-                  {Object.entries(artifacts.answers).map(([q, a]) => (
+                  {Object.entries(artifacts.answers?.content || artifacts.answers || {}).map(([q, a]) => (
                     <div key={q} className="answer-item">
                       <div className="answer-q">{q.replace(/_/g, ' ')}</div>
                       <div className="answer-a">{a}</div>
@@ -217,22 +292,27 @@ function ArtifactModal({ job, score, onClose }) {
   );
 }
 
-function SearchModal({ onClose, onSuccess }) {
+// ── Search modal ───────────────────────────────────────────────────
+function SearchModal({ session, onClose, onSuccess }) {
   const [keywords, setKeywords] = React.useState('Senior GenAI Engineer');
   const [location, setLocation] = React.useState('Dallas, TX');
   const [workType, setWorkType] = React.useState('remote,hybrid');
   const [maxResults, setMaxResults] = React.useState(10);
   const [loading, setLoading] = React.useState(false);
   const [result, setResult] = React.useState(null);
+  const headers = makeHeaders(session);
 
   const search = async () => {
     setLoading(true);
-    const params = new URLSearchParams({ keywords, location, work_type: workType, max_results: maxResults, auto_parse: true });
-    const res = await fetch(`${API}/jobs/search?${params}`, { method: 'POST', headers: HEADERS });
-    const data = await res.json();
-    setResult(data);
-    setLoading(false);
-    if (data.ingested > 0 || data.parsed > 0) onSuccess();
+    setResult(null);
+    try {
+      const params = new URLSearchParams({ keywords, location, work_type: workType, max_results: maxResults, auto_parse: true });
+      const res = await fetch(`${API}/jobs/search?${params}`, { method: 'POST', headers });
+      const data = await res.json();
+      setResult(data);
+      if ((data.ingested ?? 0) > 0 || (data.parsed ?? 0) > 0) onSuccess();
+    } catch (e) { setResult({ error: e.message }); }
+    finally { setLoading(false); }
   };
 
   return (
@@ -254,7 +334,7 @@ function SearchModal({ onClose, onSuccess }) {
           </select>
         </div>
         <div className="input-group"><label>Max Results</label>
-          <select value={maxResults} onChange={e => setMaxResults(e.target.value)}>
+          <select value={maxResults} onChange={e => setMaxResults(Number(e.target.value))}>
             {[5,10,20,50].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
         </div>
@@ -263,7 +343,10 @@ function SearchModal({ onClose, onSuccess }) {
         </button>
         {result && (
           <div style={{ marginTop: 16, padding: 14, background: '#0f1117', borderRadius: 8, fontSize: 13 }}>
-            <div style={{ color: '#10b981' }}>✓ Fetched: {result.total_fetched} | Ingested: {result.ingested} | Parsed: {result.parsed}</div>
+            {result.error
+              ? <div style={{ color: '#ef4444' }}>Error: {result.error}</div>
+              : <div style={{ color: '#10b981' }}>✓ Fetched: {result.total_fetched ?? 0} | Ingested: {result.ingested ?? 0} | Parsed: {result.parsed ?? 0}</div>
+            }
             {result.duplicates > 0 && <div style={{ color: '#64748b', marginTop: 4 }}>Duplicates skipped: {result.duplicates}</div>}
           </div>
         )}
@@ -272,136 +355,92 @@ function SearchModal({ onClose, onSuccess }) {
   );
 }
 
+// ── Main App ───────────────────────────────────────────────────────
 function App() {
+  const [session, setSession] = React.useState(() => getSession());
   const [jobs, setJobs] = React.useState([]);
   const [scores, setScores] = React.useState({});
-  const [loading, setLoading] = React.useState(true);
+  const [loading, setLoading] = React.useState(false);
   const [filter, setFilter] = React.useState('all');
   const [selectedJob, setSelectedJob] = React.useState(null);
   const [showSearch, setShowSearch] = React.useState(false);
   const [toast, setToast] = React.useState(null);
   const [scoring, setScoring] = React.useState({});
-  const [stats, setStats] = React.useState({ total: 0, scored: 0, applied: 0, apply: 0, auto: 0 });
+  const [apiError, setApiError] = React.useState('');
 
   const showToast = (msg, type = 'success') => setToast({ msg, type });
 
-  const loadJobs = async () => {
+  const loadJobs = React.useCallback(async () => {
+    if (!session) return;
     setLoading(true);
+    setApiError('');
     try {
-      // Get all raw jobs via ingest status check isn't available, use a known list approach
-      // We'll load from parsed jobs perspective
-      const resp = await fetch(`${API}/users`, { headers: HEADERS });
-      // Workaround: search with empty to get jobs (use a batch score summary)
-      // Actually load recently ingested jobs by fetching known job_ids
-      // For now load via a direct DB perspective isn't exposed, so we show what we have scored
-      setLoading(false);
-    } catch(e) {
-      setLoading(false);
-    }
-  };
-
-  // Load jobs by re-searching (duplicates=ok, already in db)
-  const loadFromSearch = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ keywords: 'Senior GenAI Engineer', location: 'Dallas, TX', work_type: 'remote,hybrid', max_results: 20, auto_parse: true });
-      const res = await fetch(`${API}/jobs/search?${params}`, { method: 'POST', headers: HEADERS });
+      const headers = makeHeaders(session);
+      const res = await fetch(`${API}/jobs/?page=1&limit=50`, { headers });
+      if (res.status === 401) { clearSession(); setSession(null); return; }
       const data = await res.json();
+      const jobList = data.jobs || [];
+      setJobs(jobList);
+      // Seed scores from the list response (backend joins score data)
+      const seeded = {};
+      jobList.forEach(j => {
+        if (j.score != null) {
+          seeded[j.job_id] = { total_score: j.score, verdict: j.verdict, breakdown: j.breakdown, rationale: j.rationale };
+        }
+      });
+      setScores(seeded);
+    } catch (e) {
+      setApiError(e.message);
+    } finally { setLoading(false); }
+  }, [session]);
 
-      // Now score all ingested job_ids we know about
-      // Use a list endpoint workaround — collect job_ids from response
-      if (data.job_ids?.length > 0 || data.duplicates > 0) {
-        // Fetch scores for what we have
-        await loadScores(data.job_ids || []);
-      }
-      setLoading(false);
-    } catch(e) {
-      setLoading(false);
-    }
-  };
-
-  const loadScores = async (jobIds) => {
-    const newScores = {};
-    for (const jid of jobIds) {
-      try {
-        const s = await api.get(`/jobs/${jid}/score?user_id=${USER_ID}`);
-        if (s.total_score) newScores[jid] = s;
-      } catch(e) {}
-    }
-    setScores(prev => ({ ...prev, ...newScores }));
-  };
+  React.useEffect(() => { loadJobs(); }, [loadJobs]);
 
   const scoreJob = async (jobId) => {
     setScoring(prev => ({ ...prev, [jobId]: true }));
     try {
-      const s = await fetch(`${API}/jobs/${jobId}/score?user_id=${USER_ID}`, { method: 'POST', headers: HEADERS }).then(r => r.json());
+      const headers = makeHeaders(session);
+      const res = await fetch(`${API}/jobs/${jobId}/score`, { method: 'POST', headers });
+      if (res.status === 401) { clearSession(); setSession(null); return; }
+      const s = await res.json();
       if (s.total_score) {
         setScores(prev => ({ ...prev, [jobId]: s }));
+        setJobs(prev => prev.map(j => j.job_id === jobId ? { ...j, score: s.total_score, verdict: s.verdict } : j));
         showToast(`Scored: ${s.total_score}/100 — ${s.verdict}`);
       }
-    } catch(e) { showToast('Scoring failed', 'error'); }
-    setScoring(prev => ({ ...prev, [jobId]: false }));
+    } catch (e) { showToast('Scoring failed', 'error'); }
+    finally { setScoring(prev => ({ ...prev, [jobId]: false })); }
   };
 
-  // Minimal job list — use hardcoded known job IDs from session for demo
-  // In production this needs a GET /jobs list endpoint
-  const KNOWN_JOBS = [
-    { job_id: 'ff56043c-81d0-4a45-8164-38e024ac16e6', title: 'Senior Software Engineer', company: 'Deloitte', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '4f2e4e6a-0fc7-4cb6-9f4e-5af74c8012a7', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '2d71bee2-10f5-4436-b5a5-0d779607cd68', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '16b88e13-db87-440a-80dc-af0e7a659d09', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '9f469ff7-bd37-4edc-b44d-fe36fe967553', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '744f40f8-5bb1-454c-a802-1c6d52d53816', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: 'efeec720-3ba0-4cb9-998c-37927d0c769e', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '29028674-2412-4d08-bc47-dd752f49e64a', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: 'fca494b9-d638-42e7-b864-868e62bc115f', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-    { job_id: '9602140b-23ab-4469-8e26-ecffd4272952', title: 'GenAI Engineer', company: 'Unknown', location: 'Dallas, TX', source: 'jsearch' },
-  ];
-
-  React.useEffect(() => {
-    setJobs(KNOWN_JOBS);
-    setLoading(false);
-    // Load existing scores
-    loadScores(KNOWN_JOBS.map(j => j.job_id));
-  }, []);
-
-  // Enrich job titles from parsed data
-  React.useEffect(() => {
-    KNOWN_JOBS.forEach(async (job) => {
-      try {
-        const parsed = await api.get(`/jobs/${job.job_id}/parsed`);
-        if (parsed.parsed_jd?.role && parsed.parsed_jd.role !== 'Unknown') {
-          setJobs(prev => prev.map(j => j.job_id === job.job_id ? { ...j, title: parsed.parsed_jd.role, parsedData: parsed.parsed_jd } : j));
-        }
-      } catch(e) {}
-    });
-  }, []);
+  if (!session) return <LoginScreen onLogin={s => setSession(s)} />;
 
   const filteredJobs = jobs.filter(job => {
     const score = scores[job.job_id];
     if (filter === 'all') return true;
     if (filter === 'unscored') return !score;
-    if (filter === 'apply') return score?.verdict === 'ASSISTED_APPLY';
-    if (filter === 'auto') return score?.verdict === 'ELIGIBLE_AUTO_SUBMIT';
-    if (filter === 'skip') return score?.verdict === 'SKIP';
+    if (filter === 'apply') return (score?.verdict || job.verdict) === 'ASSISTED_APPLY';
+    if (filter === 'auto') return (score?.verdict || job.verdict) === 'ELIGIBLE_AUTO_SUBMIT';
+    if (filter === 'skip') return (score?.verdict || job.verdict) === 'SKIP';
     return true;
   });
 
-  const scored = Object.keys(scores).length;
+  const scored = jobs.filter(j => scores[j.job_id]?.total_score != null || j.score != null).length;
   const toApply = Object.values(scores).filter(s => s.verdict === 'ASSISTED_APPLY').length;
   const autoEligible = Object.values(scores).filter(s => s.verdict === 'ELIGIBLE_AUTO_SUBMIT').length;
-  const avgScore = scored > 0 ? Math.round(Object.values(scores).reduce((a, s) => a + s.total_score, 0) / scored) : 0;
+  const scoreValues = Object.values(scores).map(s => s.total_score).filter(Boolean);
+  const avgScore = scoreValues.length > 0 ? Math.round(scoreValues.reduce((a, b) => a + b, 0) / scoreValues.length) : 0;
 
   return (
     <div className="app">
       <div className="header">
         <div>
           <h1>⚡ JobForge AI</h1>
-          <div className="subtitle">Intelligent job application pipeline</div>
+          <div className="subtitle">{session.email} · Dev Dashboard</div>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button className="btn btn-secondary" onClick={() => loadScores(jobs.map(j => j.job_id))}>↻ Refresh Scores</button>
+          <button className="btn btn-secondary" onClick={loadJobs}>↻ Refresh</button>
           <button className="btn btn-primary" onClick={() => setShowSearch(true)}>+ Search Jobs</button>
+          <button className="btn btn-secondary" onClick={() => { clearSession(); setSession(null); }}>Sign Out</button>
         </div>
       </div>
 
@@ -422,6 +461,12 @@ function App() {
         <span className="step step-done">✓ Outcomes</span>
       </div>
 
+      {apiError && (
+        <div style={{ background: '#1f1010', border: '1px solid #ef444433', color: '#ef4444', borderRadius: 8, padding: '10px 14px', fontSize: 13, marginBottom: 16 }}>
+          Failed to load jobs: {apiError}. Is the API running?
+        </div>
+      )}
+
       <div className="controls">
         <div className="filter-tabs">
           {[['all','All'], ['unscored','Unscored'], ['apply','To Apply'], ['auto','Auto'], ['skip','Skip']].map(([v, l]) => (
@@ -432,30 +477,32 @@ function App() {
       </div>
 
       {loading ? (
-        <div className="loading"><div className="spinner"/><span>Loading pipeline...</span></div>
+        <div className="loading"><div className="spinner"/><span>Loading jobs...</span></div>
       ) : filteredJobs.length === 0 ? (
         <div className="empty-state">
-          <h3>No jobs in this filter</h3>
-          <p>Search for jobs or change the filter</p>
+          <h3>{jobs.length === 0 ? 'No jobs yet' : 'No jobs match this filter'}</h3>
+          <p>{jobs.length === 0 ? 'Click "+ Search Jobs" to ingest jobs.' : 'Try a different filter.'}</p>
         </div>
       ) : (
         <div className="jobs-grid">
           {filteredJobs.map(job => {
             const score = scores[job.job_id];
+            const totalScore = score?.total_score ?? job.score;
+            const verdict = score?.verdict ?? job.verdict;
             return (
               <div key={job.job_id} className={`job-card ${selectedJob?.job_id === job.job_id ? 'selected' : ''}`}>
                 <div className="job-header">
                   <div style={{ flex: 1 }}>
-                    <div className="job-title">{job.title}</div>
+                    <div className="job-title">{job.parsed_role || job.title || 'Unknown Role'}</div>
                     <div className="job-company">{job.company}</div>
                     <div className="job-meta">
                       <span className="tag tag-source">{job.source}</span>
                       {job.location && <span className="tag tag-location">{job.location}</span>}
-                      {score && <VerdictBadge verdict={score.verdict} />}
+                      {verdict && <VerdictBadge verdict={verdict} />}
                     </div>
                   </div>
                   <div className="score-badge">
-                    <ScoreCircle score={score?.total_score} />
+                    <ScoreCircle score={totalScore} />
                   </div>
                 </div>
 
@@ -473,24 +520,19 @@ function App() {
                   </div>
                 )}
 
-                {score?.rationale && (
+                {(score?.rationale || job.rationale) && (
                   <div style={{ fontSize: 12, color: '#64748b', marginTop: 10, padding: '8px 12px', background: '#0f1117', borderRadius: 6 }}>
-                    {score.rationale}
+                    {score?.rationale || job.rationale}
                   </div>
                 )}
 
                 <div className="job-actions">
-                  {!score && (
-                    <button className="btn btn-secondary btn-sm" onClick={() => scoreJob(job.job_id)} disabled={scoring[job.job_id]}>
-                      {scoring[job.job_id] ? 'Scoring...' : '⚡ Score'}
-                    </button>
-                  )}
-                  {score && (
-                    <button className="btn btn-secondary btn-sm" onClick={() => scoreJob(job.job_id)} disabled={scoring[job.job_id]}>↻ Re-score</button>
-                  )}
+                  <button className="btn btn-secondary btn-sm" onClick={() => scoreJob(job.job_id)} disabled={scoring[job.job_id]}>
+                    {scoring[job.job_id] ? 'Scoring...' : totalScore ? '↻ Re-score' : '⚡ Score'}
+                  </button>
                   <button className="btn btn-secondary btn-sm" onClick={() => setSelectedJob(job)}>✨ Artifacts</button>
-                  {score && (score.verdict === 'ASSISTED_APPLY' || score.verdict === 'ELIGIBLE_AUTO_SUBMIT') && (
-                    <a href={`https://www.google.com/search?q=${encodeURIComponent(job.title + ' ' + job.company + ' jobs')}`} target="_blank" rel="noreferrer">
+                  {(verdict === 'ASSISTED_APPLY' || verdict === 'ELIGIBLE_AUTO_SUBMIT') && (
+                    <a href={`https://www.google.com/search?q=${encodeURIComponent((job.parsed_role || job.title || '') + ' ' + (job.company || '') + ' jobs')}`} target="_blank" rel="noreferrer">
                       <button className="btn btn-green btn-sm">🚀 Apply</button>
                     </a>
                   )}
@@ -504,8 +546,8 @@ function App() {
         </div>
       )}
 
-      {selectedJob && <ArtifactModal job={selectedJob} score={scores[selectedJob.job_id]} onClose={() => setSelectedJob(null)} />}
-      {showSearch && <SearchModal onClose={() => setShowSearch(false)} onSuccess={() => { setShowSearch(false); showToast('Jobs ingested! Refresh scores.'); }} />}
+      {selectedJob && <ArtifactModal job={selectedJob} score={scores[selectedJob.job_id]} session={session} onClose={() => setSelectedJob(null)} />}
+      {showSearch && <SearchModal session={session} onClose={() => setShowSearch(false)} onSuccess={() => { setShowSearch(false); loadJobs(); showToast('Jobs ingested!'); }} />}
       {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
     </div>
   );
