@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from apps.web.auth import get_current_user
@@ -26,6 +27,60 @@ except ImportError:
 logger = get_logger(__name__)
 router = APIRouter(prefix="/resume", tags=["resume"])
 role_extractor = RoleExtractor()
+
+# MIME types accepted from browsers for PDF and DOCX.
+# Safari/macOS reports .docx as application/octet-stream or application/zip,
+# so we accept those too and rely on the file extension as fallback.
+ACCEPTED_MIME = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    # Safari / some OS file pickers send these for .docx
+    "application/octet-stream",
+    "application/zip",
+    # Generic binary — allow and validate by extension
+    "binary/octet-stream",
+    "",          # occasionally empty string from some browsers
+}
+
+ACCEPTED_EXTENSIONS = {".pdf", ".docx", ".doc"}
+
+
+def _validate_file(file: UploadFile) -> str:
+    """
+    Returns normalised extension ('pdf' or 'docx').
+    Raises HTTPException 400 if the file is not acceptable.
+    We validate by MIME *or* extension — whichever confirms the type.
+    """
+    mime = (file.content_type or "").lower().split(";")[0].strip()
+    filename = file.filename or ""
+    ext = ""
+    if "." in filename:
+        ext = "." + filename.rsplit(".", 1)[-1].lower()
+
+    is_pdf  = mime == "application/pdf" or ext == ".pdf"
+    is_docx = (
+        mime in (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+        )
+        or ext in (".docx", ".doc")
+        or (mime in ("application/octet-stream", "application/zip", "binary/octet-stream", "")
+            and ext in (".docx", ".doc"))
+    )
+
+    if is_pdf:
+        return "pdf"
+    if is_docx:
+        return "docx"
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Unsupported file type '{mime}' (extension: '{ext}'). "
+            "Please upload a PDF or DOCX file."
+        ),
+    )
 
 
 class RoleConfirmRequest(BaseModel):
@@ -68,21 +123,19 @@ async def upload_resume(
     current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a resume. Deduplicates by content hash. Scoped to current user."""
-    if file.content_type not in (
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
-    ):
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are accepted.")
+    """
+    Upload a resume. Deduplicates by content hash *per user*.
+    Different users may upload the same file without conflict.
+    """
+    file_ext = _validate_file(file)
 
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large. Max 10MB.")
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 10 MB.")
 
     content_hash = hashlib.sha256(content).hexdigest()
 
-    # Dedup check — but only within this user's resumes
+    # ── Per-user dedup check (same user, same file = duplicate) ──────────────
     existing = (
         db.query(Resume)
         .filter(Resume.user_id == current_user_id, Resume.content_hash == content_hash)
@@ -96,23 +149,21 @@ async def upload_resume(
             "file_name": existing.file_name,
         }
 
-    # Version number for this user
-    version = (
-        db.query(Resume).filter(Resume.user_id == current_user_id).count() + 1
-    )
+    # ── Version number for this user ──────────────────────────────────────────
+    version = db.query(Resume).filter(Resume.user_id == current_user_id).count() + 1
 
-    # Upload to Azure Blob
-    file_ext = "pdf" if "pdf" in (file.content_type or "") else "docx"
+    # ── Azure Blob upload ─────────────────────────────────────────────────────
+    # Blob path is scoped under user_id so different users never overwrite each other.
     blob_name = f"{current_user_id}/{content_hash}.{file_ext}"
-    file_path = blob_name
+    file_path  = blob_name
 
     if AZURE_CONN:
         try:
             blob_client = BlobServiceClient.from_connection_string(AZURE_CONN)
-            container = blob_client.get_container_client(AZURE_CONTAINER)
+            container  = blob_client.get_container_client(AZURE_CONTAINER)
             container.upload_blob(name=blob_name, data=io.BytesIO(content), overwrite=True)
         except Exception as e:
-            logger.warning(f"Azure upload failed, storing path only: {e}")
+            logger.warning(f"Azure upload warning (non-fatal): {e}")
 
     resume = Resume(
         user_id=current_user_id,
@@ -123,9 +174,28 @@ async def upload_resume(
         content_hash=content_hash,
     )
     db.add(resume)
-    db.commit()
-    db.refresh(resume)
 
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        # This can only happen if the DB schema still has a global UNIQUE on
+        # content_hash (i.e. before migration to per-user unique index).
+        # We detect it and surface a clear error rather than a 500.
+        err_str = str(e.orig).lower()
+        if "content_hash" in err_str and "unique" in err_str:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This resume file is already in the system under another account. "
+                    "If this is your resume, please contact support. "
+                    "(DB schema needs migration: content_hash unique constraint "
+                    "should be scoped to (user_id, content_hash).)"
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"Database error: {e.orig}")
+
+    db.refresh(resume)
     logger.info(f"Resume uploaded: user={current_user_id} resume={resume.resume_id} v{version}")
     return {
         "resume_id": str(resume.resume_id),
@@ -165,7 +235,6 @@ async def analyze_resume(
 
     role_matches = role_extractor.extract_roles(file_bytes, resume.file_type)
 
-    # Clear old role matches for this resume
     db.query(RoleMatch).filter(RoleMatch.resume_id == resume_id).delete()
 
     for match in role_matches:
@@ -236,7 +305,6 @@ async def confirm_roles(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found or not yours.")
 
-    # Reset all, then confirm selected
     db.query(RoleMatch).filter(RoleMatch.resume_id == body.resume_id).update(
         {"is_confirmed": False}
     )
@@ -277,7 +345,6 @@ async def delete_resume(
     if not resume:
         raise HTTPException(status_code=404, detail="Resume not found or not yours.")
 
-    # Delete role matches first (FK)
     db.query(RoleMatch).filter(RoleMatch.resume_id == resume_id).delete()
     db.delete(resume)
     db.commit()
