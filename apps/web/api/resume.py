@@ -37,7 +37,6 @@ async def upload_resume(
     db: Session = Depends(get_db),
 ):
     """Upload and parse resume."""
-    # Initialize BlobServiceClient inside the endpoint for robustness
     AZURE_CONNECTION_STRING = os.getenv("AZURE_BLOB_CONNECTION_STRING")
     AZURE_CONTAINER = "resumes"
     if not AZURE_CONNECTION_STRING:
@@ -46,14 +45,11 @@ async def upload_resume(
             status_code=500, detail="Azure Blob Storage connection string is not configured."
         )
     try:
-        # Initialize BlobServiceClient
         blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
-
-        # Ensure container exists, create if necessary
         try:
             container_client = blob_service_client.get_container_client(AZURE_CONTAINER)
             container_client.get_container_properties()
-        except Exception as e:
+        except Exception:
             logger.info(f"Container {AZURE_CONTAINER} not found, creating it...")
             try:
                 blob_service_client.create_container(name=AZURE_CONTAINER)
@@ -84,10 +80,8 @@ async def upload_resume(
         )
 
     try:
-        # Read file content
         file_content = await file.read()
 
-        # Parse resume FIRST to get content hash for deduplication check
         from datetime import datetime
         from uuid import uuid4
         from sqlalchemy import func
@@ -96,7 +90,7 @@ async def upload_resume(
             file_content=file_content, file_name=file.filename, user_id=str(user_id)
         )
 
-        # Check if resume already exists BEFORE uploading to blob
+        # Check for duplicate BEFORE uploading to blob
         existing_resume = (
             db.query(Resume).filter(Resume.content_hash == parsed_data["content_hash"]).first()
         )
@@ -109,37 +103,34 @@ async def upload_resume(
                 message="Resume already exists",
             )
 
-        # Only now upload to blob if it's a new resume
-        # Get user name for path
+        # Upload to blob
         user_name = user.full_name.replace(" ", "_").lower()
-
-        # Get next version number for this user
         max_version = (
             db.query(func.max(Resume.version)).filter(Resume.user_id == user_id).scalar() or 0
         )
         version_number = max_version + 1
-
-        # Generate timestamp and resume ID
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         resume_id = uuid4()
-
-        # Construct blob path - use version number for readability
-        # NOTE: Don't include container name in blob_path, only the relative path within container
         blob_path = f"{user_id}_{user_name}/{version_number}_{timestamp}/{file.filename}"
 
         blob_client = blob_service_client.get_blob_client(container=AZURE_CONTAINER, blob=blob_path)
         blob_client.upload_blob(file_content, overwrite=True)
 
-        # Save to database
+        # FIX: persist text_content inside parsed_data JSONB so analyze endpoint can use it
+        combined_parsed_data = {
+            **parsed_data["parsed_data"],
+            "text_content": parsed_data["text_content"],
+        }
+
         resume = Resume(
             resume_id=resume_id,
             user_id=user_id,
-            version=version_number,  # Store version number
-            file_path=blob_path,  # Store clean blob path
+            version=version_number,
+            file_path=blob_path,
             file_name=file.filename,
             file_type=file_ext,
             content_hash=parsed_data["content_hash"],
-            parsed_data=parsed_data["parsed_data"],
+            parsed_data=combined_parsed_data,
         )
 
         db.add(resume)
@@ -170,12 +161,10 @@ async def analyze_resume(
     db: Session = Depends(get_db),
 ):
     """Analyze resume and extract role information."""
-    # Get resume
     resume = db.query(Resume).filter(Resume.resume_id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
 
-    # Verify the resume belongs to the user
     if resume.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -183,30 +172,24 @@ async def analyze_resume(
         )
 
     try:
-        # Read resume text (from parsed data or file)
+        # FIX: always read text_content from parsed_data JSONB (no local file fallback needed)
         resume_text = ""
         if resume.parsed_data and "text_content" in resume.parsed_data:
-            resume_text = resume.parsed_data.get("text_content", "")
-        else:
-            # Read from file if not in parsed_data
-            from pathlib import Path
+            resume_text = resume.parsed_data["text_content"]
 
-            file_path = Path(resume.file_path)
-            if file_path.exists():
-                if resume.file_type == "pdf":
-                    resume_text = resume_parser._extract_text_pdf(file_path)
-                else:
-                    resume_text = resume_parser._extract_text_docx(file_path)
+        if not resume_text.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Resume text is empty — please re-upload your resume to refresh parsed data.",
+            )
 
-        # Analyze with LLM (with caching)
         analysis = role_extractor.analyze_resume(
             resume_text=resume_text, resume_hash=resume.content_hash
         )
 
-        # Update resume_id in response
         analysis.resume_id = resume.resume_id
 
-        # Save suggested roles to database
+        # Save suggested roles to DB
         for role_match in analysis.suggested_roles:
             role_match_db = RoleMatchModel(
                 resume_id=resume.resume_id,
@@ -222,6 +205,8 @@ async def analyze_resume(
 
         return analysis
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Resume analysis failed: {e}")
         raise HTTPException(
@@ -234,12 +219,11 @@ async def analyze_resume(
 async def get_suggested_roles(
     resume_id: UUID, user_id: UUID = Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    """Get suggested roles for resume (user's own resumes only)."""
+    """Get suggested roles for resume."""
     resume = db.query(Resume).filter(Resume.resume_id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
 
-    # Verify resume ownership
     if resume.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -266,23 +250,22 @@ async def confirm_role(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Confirm a role match (user's own resumes only)."""
+    """Confirm a role match."""
     resume = db.query(Resume).filter(Resume.resume_id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
 
-    # Verify resume ownership
     if resume.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to modify this resume",
         )
 
-    # Find role match
     role_match = (
         db.query(RoleMatchModel)
         .filter(
-            RoleMatchModel.resume_id == resume_id, RoleMatchModel.role_title == request.role_title
+            RoleMatchModel.resume_id == resume_id,
+            RoleMatchModel.role_title == request.role_title,
         )
         .first()
     )
@@ -309,12 +292,11 @@ async def delete_resume(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a resume (user's own resumes only)."""
+    """Delete a resume."""
     resume = db.query(Resume).filter(Resume.resume_id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
 
-    # Verify resume ownership
     if resume.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -322,7 +304,6 @@ async def delete_resume(
         )
 
     try:
-        # Delete from Azure Blob Storage if path is available
         if resume.file_path:
             AZURE_CONNECTION_STRING = os.getenv("AZURE_BLOB_CONNECTION_STRING")
             AZURE_CONTAINER = "resumes"
@@ -339,10 +320,7 @@ async def delete_resume(
                 except Exception as e:
                     logger.warning(f"Failed to delete resume from Azure: {e}")
 
-        # Delete associated role matches
         db.query(RoleMatchModel).filter(RoleMatchModel.resume_id == resume_id).delete()
-
-        # Delete resume from database
         db.delete(resume)
         db.commit()
 
@@ -364,12 +342,11 @@ async def get_resume(
     user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get resume details (user's own resumes only)."""
+    """Get resume details."""
     resume = db.query(Resume).filter(Resume.resume_id == resume_id).first()
     if not resume:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resume not found")
 
-    # Verify resume ownership
     if resume.user_id != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

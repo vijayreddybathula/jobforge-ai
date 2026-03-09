@@ -1,7 +1,7 @@
 """Role extraction service using LLM."""
 
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
+from openai import AzureOpenAI
 from packages.common.llm_cache import ResumeAnalysisCache
 from packages.common.logging import get_logger
 from packages.schemas.resume import RoleMatch, ResumeAnalysisResponse
@@ -17,20 +17,29 @@ class RoleExtractor:
 
     def __init__(self):
         """Initialize role extractor."""
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
+        api_key = os.getenv("AZURE_OPENAPI_KEY")
+        endpoint = os.getenv("AZURE_OPENAPI_ENDPOINT")
+        api_version = os.getenv("AZURE_OPENAPI_VERSION", "2024-06-01-preview")
 
-        self.client = OpenAI(api_key=api_key)
+        if not api_key:
+            raise ValueError("AZURE_OPENAPI_KEY environment variable not set")
+        if not endpoint:
+            raise ValueError("AZURE_OPENAPI_ENDPOINT environment variable not set")
+
+        self.client = AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version,
+        )
         self.cache = ResumeAnalysisCache()
-        self.model = "gpt-4"  # Use GPT-4 for better structured output
+        self.model = os.getenv("AZURE_OPENAPI_DEPLOYMENT", "GPT-4")
 
     def _create_prompt(self, resume_text: str) -> str:
         """Create prompt for role extraction."""
         return f"""Analyze the following resume and extract structured information.
 
 Resume text:
-{resume_text[:4000]}  # Limit to first 4000 chars
+{resume_text[:4000]}
 
 Please extract and return a JSON object with the following structure:
 {{
@@ -96,7 +105,6 @@ Return only valid JSON, no additional text."""
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response as JSON: {e}")
-            # Return fallback structure
             return {
                 "current_role": None,
                 "years_of_experience": None,
@@ -122,7 +130,6 @@ Return only valid JSON, no additional text."""
         """
         extracted = self.extract_roles(resume_text, resume_hash)
 
-        # Convert to response model
         suggested_roles = [
             RoleMatch(
                 role_title=role.get("role_title", ""),
