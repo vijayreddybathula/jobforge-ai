@@ -8,7 +8,7 @@ from uuid import UUID
 from packages.database.connection import get_db
 from packages.database.models import JobRaw, JobParsed, JobScore
 from services.job_ingestion.ingestion_service import IngestionService
-from services.job_ingestion.sources.jsearch_source import JSearchSource, JSearchAPIError
+from services.job_ingestion.sources.jsearch_source import JSearchSource, JSearchAPIError, DEFAULT_DATE_POSTED
 from services.job_ingestion.normalizer import JobNormalizer
 from services.jd_parser.jd_parser import JDParser
 from services.jd_parser.fallback_parser import FallbackParser
@@ -26,6 +26,8 @@ _normalizer       = JobNormalizer()
 
 def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobScore]) -> dict:
     """Build the standard job dict enriched with parsed data and user score."""
+    # apply_link is the direct ATS link; fall back to source_url for old rows
+    apply_link = job.apply_link or str(job.source_url) if job.source_url else None
     return {
         "job_id":       str(job.job_id),
         "title":        job.title,
@@ -33,6 +35,8 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
         "location":     job.location,
         "source":       job.source,
         "source_url":   str(job.source_url) if job.source_url else None,
+        "apply_link":   apply_link,
+        "posted_at":    job.posted_at.isoformat() if job.posted_at else None,
         "created_at":   job.created_at.isoformat(),
         "parse_status": parsed.parse_status if parsed else "NOT_PARSED",
         "parsed_role":  parsed.parsed_json.get("role") if parsed and parsed.parsed_json else None,
@@ -87,17 +91,12 @@ async def list_jobs(
             "pages": (total + limit - 1) // limit}
 
 
-# ── JSearch connectivity test — must be before /search to avoid route conflict ─
+# ── JSearch connectivity test ─────────────────────────────────────────────────
 
 @router.get("/search/test", summary="Test JSearch API connectivity without ingesting")
 async def test_jsearch_connection(
     current_user_id: UUID = Depends(get_current_user),
 ):
-    """
-    Sends a minimal query to JSearch and reports back whether the API key
-    is valid and the service is reachable. Use this to diagnose 'No jobs found'
-    issues before running a full search.
-    """
     try:
         jsearch = JSearchSource()
     except ValueError as e:
@@ -105,10 +104,7 @@ async def test_jsearch_connection(
 
     result = jsearch.test_connection()
     if not result["ok"]:
-        raise HTTPException(
-            status_code=502,
-            detail=f"JSearch connectivity test failed: {result['detail']}",
-        )
+        raise HTTPException(status_code=502, detail=f"JSearch connectivity test failed: {result['detail']}")
     return result
 
 
@@ -119,7 +115,9 @@ async def search_and_ingest_jobs(
     keywords:      str           = Query(...),
     location:      str           = Query("United States"),
     work_type:     Optional[str] = Query(None),
-    date_posted:   Optional[str] = Query(None),
+    # Default to 'week' — avoids persisting already-closed listings.
+    # Callers can pass date_posted=month or date_posted=None for broader results.
+    date_posted:   str           = Query(DEFAULT_DATE_POSTED),
     max_results:   int           = Query(20, ge=1, le=50),
     auto_parse:    bool          = Query(True),
     force_reparse: bool          = Query(False),
@@ -134,12 +132,12 @@ async def search_and_ingest_jobs(
     try:
         raw_jobs = jsearch.search_jobs(
             keywords=keywords, location=location,
-            work_type=work_type, date_posted=date_posted, max_results=max_results,
+            work_type=work_type,
+            date_posted=date_posted if date_posted != "any" else None,
+            max_results=max_results,
         )
     except JSearchAPIError as e:
-        # Surface the real error (quota exceeded, bad key, network, etc.)
-        # instead of silently returning an empty result.
-        logger.error(f"JSearch API error during search: {e} (HTTP {e.status_code})")
+        logger.error(f"JSearch API error: {e} (HTTP {e.status_code})")
         raise HTTPException(
             status_code=502,
             detail={
@@ -147,7 +145,7 @@ async def search_and_ingest_jobs(
                 "message": str(e),
                 "status_code": e.status_code,
                 "body": e.body,
-                "hint": "Check JSEARCH_API_KEY, RapidAPI subscription, and quota at rapidapi.com",
+                "hint": "Check JSEARCH_API_KEY, RapidAPI subscription, and quota.",
             },
         )
 
@@ -156,17 +154,14 @@ async def search_and_ingest_jobs(
             "message": "No jobs found for these search parameters",
             "keywords": keywords,
             "location": location,
-            "ingested": 0,
-            "duplicates": 0,
-            "job_ids": [],
-            "hint": "Try broader keywords or a different location. Use GET /jobs/search/test to verify API connectivity.",
+            "date_posted": date_posted,
+            "ingested": 0, "duplicates": 0, "job_ids": [],
+            "hint": "Try broader keywords, a different location, or date_posted=month.",
         }
 
     ingest_result    = ingestion_service.ingest_batch(jobs=raw_jobs, source="jsearch", db=db)
     ingested_job_ids = ingest_result.get("job_ids", [])
 
-    # Collect job_ids for ALL fetched jobs (new + duplicate) so duplicates
-    # still get parsed and returned in the catalog.
     all_candidate_ids = list(ingested_job_ids)
     for job_data in raw_jobs:
         normalized = _normalizer.normalize(
@@ -175,9 +170,7 @@ async def search_and_ingest_jobs(
             location=job_data.get("location", ""),
             description=job_data.get("description", ""),
         )
-        existing = db.query(JobRaw).filter(
-            JobRaw.content_hash == normalized["content_hash"]
-        ).first()
+        existing = db.query(JobRaw).filter(JobRaw.content_hash == normalized["content_hash"]).first()
         if existing and existing.job_id not in all_candidate_ids:
             all_candidate_ids.append(existing.job_id)
 
@@ -214,14 +207,15 @@ async def search_and_ingest_jobs(
 
     return {
         "message": "Job search and ingestion complete",
-        "keywords": keywords,
-        "location": location,
+        "keywords":     keywords,
+        "location":     location,
+        "date_posted":  date_posted,
         "total_fetched": len(raw_jobs),
-        "ingested":   ingest_result.get("ingested", 0),
-        "duplicates": ingest_result.get("duplicates", 0),
-        "parsed":     parse_results["parsed"],
-        "reparsed":   parse_results["reparsed"],
-        "job_ids":    [str(jid) for jid in all_candidate_ids],
+        "ingested":     ingest_result.get("ingested", 0),
+        "duplicates":   ingest_result.get("duplicates", 0),
+        "parsed":       parse_results["parsed"],
+        "reparsed":     parse_results["reparsed"],
+        "job_ids":      [str(jid) for jid in all_candidate_ids],
     }
 
 
@@ -318,7 +312,7 @@ async def get_parsed_job(
             "parsed_jd": parsed.parsed_json, "parser_version": parsed.parser_version}
 
 
-# ── Single job detail — MUST be last so /{job_id}/xxx routes match first ──────
+# ── Single job detail ─────────────────────────────────────────────────────────
 
 @router.get("/{job_id}", summary="Get a single job enriched with this user's score")
 async def get_job(
@@ -329,7 +323,6 @@ async def get_job(
     job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-
     parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
     score  = (
         db.query(JobScore)

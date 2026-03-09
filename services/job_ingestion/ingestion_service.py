@@ -19,10 +19,9 @@ class IngestionService:
     """Service for ingesting jobs from various sources."""
 
     def __init__(self):
-        """Initialize ingestion service."""
-        self.normalizer = JobNormalizer()
+        self.normalizer   = JobNormalizer()
         self.rate_limiter = RateLimiter()
-        self.cache = get_redis_cache()
+        self.cache        = get_redis_cache()
 
     def ingest_job(
         self,
@@ -32,55 +31,45 @@ class IngestionService:
         company: str,
         location: str,
         description: str,
+        apply_link: Optional[str] = None,
         html_content: Optional[str] = None,
         posted_at: Optional[datetime] = None,
         db: Optional[Session] = None,
     ) -> Dict[str, Any]:
         """Ingest a single job posting.
 
-        Args:
-            source: Source type (linkedin, workday, etc.)
-            source_url: URL of the job posting
-            title: Job title
-            company: Company name
-            location: Job location
-            description: Job description text
-            html_content: Optional HTML content
-            posted_at: Optional posting date
-            db: Database session
-
-        Returns:
-            Dictionary with job_id and ingest_status
+        apply_link is the direct ATS/employer URL shown to the user on the
+        Apply button.  source_url is the canonical dedup URL (e.g. JSearch's
+        own job_url).  They are often the same but diverge for JSearch jobs
+        where job_url != job_apply_link.
         """
         if db is None:
             db = next(get_db())
 
         try:
-            # Normalize and deduplicate
             normalized = self.normalizer.normalize(
                 title=title, company=company, location=location, description=description
             )
-
             content_hash = normalized["content_hash"]
 
-            # Check if already exists (using Redis set for fast lookup)
             seen_key = f"jobs:seen:{content_hash}"
             if self.cache.is_in_set(seen_key, content_hash):
                 logger.debug(f"Job already seen: {content_hash[:8]}...")
                 return {"job_id": None, "ingest_status": "DUPLICATE", "dedupe": True}
 
-            # Check database for existing job
             existing = db.query(JobRaw).filter(JobRaw.content_hash == content_hash).first()
-
             if existing:
-                # Add to Redis set
+                # Update apply_link if we have a better one now
+                if apply_link and not existing.apply_link:
+                    existing.apply_link = apply_link
+                    db.commit()
                 self.cache.add_to_set(seen_key, content_hash)
                 return {"job_id": existing.job_id, "ingest_status": "DUPLICATE", "dedupe": True}
 
-            # Create new job record
             job = JobRaw(
                 source=source,
                 source_url=source_url,
+                apply_link=apply_link or source_url,
                 company=normalized["company"],
                 title=normalized["title"],
                 location=normalized["location"],
@@ -90,10 +79,8 @@ class IngestionService:
                 ingest_status="INGESTED",
             )
 
-            # Save HTML snapshot if provided
             if html_content:
                 from pathlib import Path
-
                 storage_path = Path("./storage/jobs")
                 storage_path.mkdir(parents=True, exist_ok=True)
                 snapshot_path = storage_path / f"{content_hash}.html"
@@ -103,12 +90,8 @@ class IngestionService:
             db.add(job)
             db.commit()
             db.refresh(job)
-
-            # Add to Redis set
             self.cache.add_to_set(seen_key, content_hash)
-
             logger.info(f"Job ingested: {job.job_id} from {source}")
-
             return {"job_id": job.job_id, "ingest_status": "INGESTED", "dedupe": False}
 
         except Exception as e:
@@ -119,16 +102,7 @@ class IngestionService:
     def ingest_batch(
         self, jobs: List[Dict[str, Any]], source: str, db: Optional[Session] = None
     ) -> Dict[str, Any]:
-        """Ingest multiple jobs.
-
-        Args:
-            jobs: List of job dictionaries
-            source: Source type
-            db: Database session
-
-        Returns:
-            Summary of ingestion results
-        """
+        """Ingest multiple jobs."""
         if db is None:
             db = next(get_db())
 
@@ -138,6 +112,7 @@ class IngestionService:
             result = self.ingest_job(
                 source=source,
                 source_url=job_data.get("url", ""),
+                apply_link=job_data.get("apply_link"),
                 title=job_data.get("title", ""),
                 company=job_data.get("company", ""),
                 location=job_data.get("location", ""),
@@ -146,7 +121,6 @@ class IngestionService:
                 posted_at=job_data.get("posted_at"),
                 db=db,
             )
-
             if result["ingest_status"] == "INGESTED":
                 results["ingested"] += 1
                 results["job_ids"].append(result["job_id"])
@@ -156,8 +130,7 @@ class IngestionService:
                 results["failed"] += 1
 
         logger.info(
-            f"Batch ingestion completed: {results['ingested']} ingested, "
+            f"Batch ingestion: {results['ingested']} ingested, "
             f"{results['duplicates']} duplicates, {results['failed']} failed"
         )
-
         return results

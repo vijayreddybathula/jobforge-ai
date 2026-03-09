@@ -1,4 +1,4 @@
-"""JSearch API job source - container native LinkedIn/Indeed job search."""
+"""JSearch API job source."""
 
 import os
 import requests
@@ -9,9 +9,13 @@ logger = get_logger(__name__)
 
 JSEARCH_BASE_URL = "https://jsearch.p.rapidapi.com"
 
+# Default freshness window — only ingest jobs posted in the last week.
+# Older postings are often already closed on the original job board (Dice,
+# Indeed, LinkedIn redirect) by the time we click them.
+DEFAULT_DATE_POSTED = "week"
+
 
 class JSearchAPIError(Exception):
-    """Raised when the JSearch API returns an error response."""
     def __init__(self, message: str, status_code: Optional[int] = None, body: Optional[str] = None):
         super().__init__(message)
         self.status_code = status_code
@@ -19,26 +23,19 @@ class JSearchAPIError(Exception):
 
 
 class JSearchSource:
-    """Fetch jobs from JSearch API (RapidAPI) - works from any container."""
+    """Fetch jobs from JSearch API (RapidAPI)."""
 
     def __init__(self):
-        self.api_key = os.getenv("JSEARCH_API_KEY")
+        self.api_key  = os.getenv("JSEARCH_API_KEY")
         self.api_host = os.getenv("JSEARCH_API_HOST", "jsearch.p.rapidapi.com")
-
         if not self.api_key:
             raise ValueError("JSEARCH_API_KEY environment variable not set")
-
         self.headers = {
-            "X-RapidAPI-Key": self.api_key,
+            "X-RapidAPI-Key":  self.api_key,
             "X-RapidAPI-Host": self.api_host,
         }
 
     def test_connection(self) -> Dict[str, Any]:
-        """Ping JSearch with a minimal query to verify API key and connectivity.
-
-        Returns a dict with 'ok', 'status_code', and 'detail'.
-        Does NOT ingest anything.
-        """
         try:
             response = requests.get(
                 f"{JSEARCH_BASE_URL}/search",
@@ -46,22 +43,12 @@ class JSearchSource:
                 params={"query": "software engineer", "page": 1, "num_pages": 1},
                 timeout=10,
             )
-            body_preview = response.text[:300]
             if response.status_code == 200:
-                data = response.json()
-                count = len(data.get("data", []))
-                return {
-                    "ok": True,
-                    "status_code": 200,
-                    "jobs_returned": count,
-                    "detail": f"JSearch reachable — {count} jobs returned for test query",
-                }
-            else:
-                return {
-                    "ok": False,
-                    "status_code": response.status_code,
-                    "detail": f"JSearch returned {response.status_code}: {body_preview}",
-                }
+                count = len(response.json().get("data", []))
+                return {"ok": True, "status_code": 200, "jobs_returned": count,
+                        "detail": f"JSearch reachable — {count} jobs returned"}
+            return {"ok": False, "status_code": response.status_code,
+                    "detail": f"JSearch returned {response.status_code}: {response.text[:300]}"}
         except requests.exceptions.Timeout:
             return {"ok": False, "status_code": None, "detail": "JSearch API timed out"}
         except Exception as e:
@@ -72,49 +59,45 @@ class JSearchSource:
         keywords: str,
         location: str = "United States",
         work_type: Optional[str] = None,
-        date_posted: Optional[str] = None,
+        date_posted: Optional[str] = DEFAULT_DATE_POSTED,
         max_results: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Search jobs via JSearch API and return normalized job list.
+        """
+        Search jobs via JSearch and return normalized list.
 
-        Raises JSearchAPIError on HTTP/network failures so callers can
-        distinguish real API errors from genuinely empty result sets.
+        date_posted defaults to 'week' to avoid returning already-closed
+        listings.  Pass date_posted=None explicitly to remove the filter.
 
-        Args:
-            keywords: Job title / role keywords e.g. 'Senior GenAI Engineer'
-            location: Location string e.g. 'Dallas, TX'
-            work_type: Comma-separated work types: 'remote', 'hybrid', 'onsite'
-            date_posted: Filter by posting date: 'today', '3days', 'week', 'month'
-            max_results: Max number of jobs to return (10 per page)
-
-        Returns:
-            List of normalized job dicts ready for IngestionService.ingest_batch()
+        Each returned dict contains BOTH:
+          url        — JSearch canonical URL  (used as dedup key / source_url)
+          apply_link — Direct ATS/employer apply link (what we open for the user)
         """
         jobs: List[Dict[str, Any]] = []
         page = 1
-        pages_needed = max(1, -(-max_results // 10))  # ceil division
+        pages_needed = max(1, -(-max_results // 10))  # ceil
 
         query = f"{keywords} in {location}" if location else keywords
 
         while len(jobs) < max_results and page <= pages_needed:
-            params: Dict[str, Any] = {
-                "query": query,
-                "page": page,
-                "num_pages": 1,
-            }
+            params: Dict[str, Any] = {"query": query, "page": page, "num_pages": 1}
 
             if date_posted:
                 params["date_posted"] = date_posted
 
             if work_type:
-                params["remote_jobs_only"] = "true" if "remote" in work_type.lower() else "false"
+                # JSearch remote_jobs_only only understands remote vs not-remote.
+                # For hybrid/onsite we leave it unset — the keywords + location
+                # are a better filter and JSearch's work-type support is limited.
+                if work_type.lower() == "remote":
+                    params["remote_jobs_only"] = "true"
+                elif "remote" not in work_type.lower():
+                    params["remote_jobs_only"] = "false"
+                # mixed (remote,hybrid) — omit the flag, broader results
 
             try:
                 response = requests.get(
                     f"{JSEARCH_BASE_URL}/search",
-                    headers=self.headers,
-                    params=params,
-                    timeout=15,
+                    headers=self.headers, params=params, timeout=15,
                 )
             except requests.exceptions.Timeout:
                 raise JSearchAPIError("JSearch API timed out after 15s")
@@ -124,14 +107,10 @@ class JSearchSource:
                 raise JSearchAPIError(f"JSearch API request failed: {e}")
 
             if not response.ok:
-                body_preview = response.text[:500]
-                logger.error(
-                    f"JSearch API HTTP {response.status_code} on page {page}: {body_preview}"
-                )
                 raise JSearchAPIError(
                     f"JSearch API returned HTTP {response.status_code}",
                     status_code=response.status_code,
-                    body=body_preview,
+                    body=response.text[:500],
                 )
 
             try:
@@ -141,7 +120,6 @@ class JSearchSource:
 
             raw_jobs = data.get("data", [])
             if not raw_jobs:
-                logger.info(f"No more jobs returned at page {page}")
                 break
 
             for raw in raw_jobs:
@@ -150,29 +128,44 @@ class JSearchSource:
                 normalized = self._normalize(raw)
                 if normalized:
                     jobs.append(normalized)
-
             page += 1
 
-        logger.info(f"JSearch returned {len(jobs)} jobs for '{keywords}' in '{location}'")
+        logger.info(f"JSearch returned {len(jobs)} jobs for '{keywords}' in '{location}' (date_posted={date_posted})")
         return jobs
 
     def _normalize(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Normalize a raw JSearch job into the format expected by IngestionService."""
+        """Normalize a raw JSearch job.
+
+        Key distinction:
+          url        = job_url  — JSearch's own tracking/canonical URL.
+                                  Stable, unique per job, used as dedup key.
+          apply_link = job_apply_link  — The actual employer/ATS application link.
+                                  This is what we show the user to click Apply.
+                                  Can be a Dice/Indeed/LinkedIn redirect that
+                                  may expire, so we fall back to url if missing.
+        """
         try:
-            title = raw.get("job_title", "").strip()
+            title   = raw.get("job_title", "").strip()
             company = raw.get("employer_name", "").strip()
-            location_parts = [
+            loc_parts = [
                 raw.get("job_city", ""),
                 raw.get("job_state", ""),
                 raw.get("job_country", ""),
             ]
-            location = ", ".join(p for p in location_parts if p).strip()
-
+            location = ", ".join(p for p in loc_parts if p).strip()
             if raw.get("job_is_remote"):
                 location = f"{location} (Remote)".strip(", ")
 
             description = raw.get("job_description", "").strip()
-            source_url = raw.get("job_apply_link") or raw.get("job_url", "")
+
+            # job_url is the canonical JSearch URL — always present, always stable.
+            # Use this as the dedup key (source_url in DB).
+            job_url = raw.get("job_url", "").strip()
+
+            # job_apply_link is the direct employer ATS URL shown to the user.
+            # Falls back to job_url if not present.
+            apply_link = (raw.get("job_apply_link") or job_url).strip()
+
             posted_at = raw.get("job_posted_at_datetime_utc")
 
             if not title or not company or not description:
@@ -180,19 +173,19 @@ class JSearchSource:
                 return None
 
             return {
-                "url": source_url,
-                "title": title,
-                "company": company,
-                "location": location,
-                "description": description,
-                "posted_at": posted_at,
+                "url":             job_url,    # used as source_url (dedup key)
+                "apply_link":      apply_link, # shown to user on Apply button
+                "title":           title,
+                "company":         company,
+                "location":        location,
+                "description":     description,
+                "posted_at":       posted_at,
                 "employment_type": raw.get("job_employment_type", ""),
-                "salary_min": raw.get("job_min_salary"),
-                "salary_max": raw.get("job_max_salary"),
+                "salary_min":      raw.get("job_min_salary"),
+                "salary_max":      raw.get("job_max_salary"),
                 "salary_currency": raw.get("job_salary_currency", "USD"),
-                "salary_period": raw.get("job_salary_period", ""),
+                "salary_period":   raw.get("job_salary_period", ""),
             }
-
         except Exception as e:
             logger.error(f"Failed to normalize job: {e}")
             return None
