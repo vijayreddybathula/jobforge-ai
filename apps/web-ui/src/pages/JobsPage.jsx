@@ -8,6 +8,24 @@ import Spinner from '../components/common/Spinner'
 import Toast from '../components/common/Toast'
 import EmptyState from '../components/common/EmptyState'
 
+/**
+ * Derive the JSearch work_type string from saved location_preferences.
+ *
+ * PreferencesPage saves: { remote: bool, hybrid: bool, onsite: bool, cities: [] }
+ * JSearch accepts:       "remote" | "hybrid" | "onsite" | comma-separated combo
+ *
+ * We build a comma-separated string of the enabled types so JSearch
+ * returns the broadest relevant set for this user.
+ */
+function deriveWorkType(locPrefs) {
+  if (!locPrefs) return 'remote,hybrid'
+  const types = []
+  if (locPrefs.remote) types.push('remote')
+  if (locPrefs.hybrid) types.push('hybrid')
+  if (locPrefs.onsite) types.push('onsite')
+  return types.length ? types.join(',') : 'remote,hybrid'
+}
+
 /* ── Search modal ────────────────────────────────────────────── */
 function SearchModal({ onClose, onSuccess, api }) {
   const [form, setForm] = useState({
@@ -16,17 +34,24 @@ function SearchModal({ onClose, onSuccess, api }) {
     work_type:   'remote,hybrid',
     max_results: 10,
   })
-  const [loading,      setLoading]      = useState(false)
-  const [prefLoading,  setPrefLoading]  = useState(true)
-  const [result,       setResult]       = useState(null)
+  const [loading,     setLoading]     = useState(false)
+  const [prefLoading, setPrefLoading] = useState(true)
+  const [result,      setResult]      = useState(null)
   const set = k => e => setForm(f => ({ ...f, [k]: e.target.value }))
 
-  /* Load user profile + preferences to pre-fill the form */
+  /**
+   * On mount: load profile + preferences and pre-fill the form.
+   *
+   * keywords  ← user_profile.core_roles (confirmed roles from resume analysis)
+   * location  ← user_preferences.location_preferences.cities[0]
+   *             or first city if multiple, else "United States" as fallback
+   * work_type ← derived from location_preferences.remote / hybrid / onsite flags
+   */
   useEffect(() => {
     let cancelled = false
     async function loadDefaults() {
       try {
-        const [profile, prefs] = await Promise.allSettled([
+        const [profileResult, prefsResult] = await Promise.allSettled([
           api.get('/profile'),
           api.get('/preferences'),
         ])
@@ -36,43 +61,34 @@ function SearchModal({ onClose, onSuccess, api }) {
         setForm(prev => {
           const next = { ...prev }
 
-          // Keywords — first confirmed role, fallback to first suggested role
-          if (profile.status === 'fulfilled' && profile.value?.core_roles?.length) {
-            next.keywords = profile.value.core_roles[0]
+          // ── Keywords: all confirmed roles joined — broadest coverage ──────
+          if (
+            profileResult.status === 'fulfilled' &&
+            profileResult.value?.core_roles?.length
+          ) {
+            // Use the first role as primary keyword — most focused results.
+            // User can edit before searching if they want a different query.
+            next.keywords = profileResult.value.core_roles[0]
           }
 
-          if (prefs.status === 'fulfilled' && prefs.value) {
-            const p = prefs.value
+          // ── Location & work type from saved preferences ───────────────────
+          if (prefsResult.status === 'fulfilled' && prefsResult.value) {
+            const prefs    = prefsResult.value
+            const locPrefs = prefs.location_preferences || {}
 
-            // Location — prefer first city in preferences, else country
-            const locPrefs = p.location_preferences || {}
-            if (locPrefs.cities?.length) {
-              next.location = locPrefs.cities[0]
-            } else if (locPrefs.country) {
-              next.location = locPrefs.country
-            } else {
-              next.location = 'United States'
-            }
+            // Location: first saved city, fallback to "United States"
+            const cities = locPrefs.cities || []
+            next.location = cities.length ? cities[0] : 'United States'
 
-            // Work type — derive from location preference flags
-            const remoteOk  = locPrefs.remote_only  ?? false
-            const hybridOk  = locPrefs.hybrid_ok    ?? true
-            const onsiteOk  = locPrefs.onsite_ok    ?? false
-            if (remoteOk && !hybridOk && !onsiteOk) {
-              next.work_type = 'remote'
-            } else if (!remoteOk && hybridOk && !onsiteOk) {
-              next.work_type = 'hybrid'
-            } else if (!remoteOk && !hybridOk && onsiteOk) {
-              next.work_type = 'onsite'
-            } else {
-              next.work_type = 'remote,hybrid'   // sensible default when mixed
-            }
+            // Work type: read the actual saved boolean flags
+            // Keys are: remote, hybrid, onsite  (set by PreferencesPage)
+            next.work_type = deriveWorkType(locPrefs)
           }
 
           return next
         })
       } catch (_) {
-        // Leave defaults — not a fatal error
+        // Non-fatal — user can still edit fields manually
       } finally {
         if (!cancelled) setPrefLoading(false)
       }
@@ -94,8 +110,8 @@ function SearchModal({ onClose, onSuccess, api }) {
       })
       const data = await api.post(`/jobs/search?${params}`)
       setResult(data)
-      // Always refresh the catalog on a successful search — even when all
-      // returned jobs are duplicates (ingested=0), they're already in the DB.
+      // Always refresh the catalog on any successful search response —
+      // even when all jobs are duplicates (ingested=0) they're in the DB.
       if (!data.error) {
         onSuccess()
       }
@@ -123,14 +139,20 @@ function SearchModal({ onClose, onSuccess, api }) {
               <label className="label">Keywords</label>
               <input className="input" value={form.keywords} onChange={set('keywords')}
                 placeholder="e.g. Senior GenAI Engineer" />
-              <p className="text-xs text-slate-500 mt-1">Pre-filled from your confirmed role</p>
+              <p className="text-xs text-slate-500 mt-1">
+                From your confirmed role — edit freely
+              </p>
             </div>
+
             <div>
               <label className="label">Location</label>
               <input className="input" value={form.location} onChange={set('location')}
                 placeholder="e.g. Dallas, TX" />
-              <p className="text-xs text-slate-500 mt-1">Pre-filled from your location preferences</p>
+              <p className="text-xs text-slate-500 mt-1">
+                From your location preferences — edit freely
+              </p>
             </div>
+
             <div>
               <label className="label">Work Type</label>
               <select className="input" value={form.work_type} onChange={set('work_type')}>
@@ -138,9 +160,13 @@ function SearchModal({ onClose, onSuccess, api }) {
                 <option value="remote">Remote only</option>
                 <option value="hybrid">Hybrid only</option>
                 <option value="onsite">Onsite</option>
+                <option value="remote,hybrid,onsite">Any</option>
               </select>
-              <p className="text-xs text-slate-500 mt-1">Pre-filled from your work preferences</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Derived from your work preferences
+              </p>
             </div>
+
             <div>
               <label className="label">Max Results</label>
               <select className="input" value={form.max_results} onChange={set('max_results')}>
