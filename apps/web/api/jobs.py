@@ -35,8 +35,6 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
         "source":       job.source,
         "source_url":   str(job.source_url) if job.source_url else None,
         "apply_link":   apply_link,
-        # posted_at is the employer-reported date; created_at is when we ingested it.
-        # The UI date chip reads posted_at — expose both so the UI can choose.
         "posted_at":    job.posted_at.isoformat() if job.posted_at else None,
         "date_posted":  job.posted_at.strftime("%m/%d/%Y") if job.posted_at else None,
         "created_at":   job.created_at.isoformat(),
@@ -49,7 +47,7 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
     }
 
 
-# ── List ─────────────────────────────────────────────────────────────────────────────
+# ── List ────────────────────────────────────────────────────────────────────────
 
 @router.get("/", summary="List all jobs with current user's score status")
 async def list_jobs(
@@ -60,16 +58,7 @@ async def list_jobs(
     current_user_id: UUID      = Depends(get_current_user),
     db: Session                = Depends(get_db),
 ):
-    """
-    List jobs with the current user's scoring status.
-
-    FIX: verdict filter is now applied at the DB/join level so that `total`
-    reflects the actual number of matching jobs, not the raw job count.
-    Previously total=7 but only 1 card showed because filter ran post-pagination.
-    """
-    # Base query
     query = db.query(JobRaw)
-
     if parsed_only:
         parsed_ids = {
             p.job_id for p in
@@ -77,9 +66,7 @@ async def list_jobs(
         }
         query = query.filter(JobRaw.job_id.in_(parsed_ids))
 
-    # Load ALL jobs (no pagination yet) so we can join scores and filter by verdict
     all_jobs = query.order_by(JobRaw.created_at.desc()).all()
-
     if not all_jobs:
         return {"jobs": [], "total": 0, "page": page, "limit": limit, "pages": 0}
 
@@ -96,22 +83,19 @@ async def list_jobs(
         db.query(JobParsed).filter(JobParsed.job_id.in_(job_ids)).all()
     }
 
-    # Build enriched list and apply verdict filter BEFORE pagination
     enriched = []
     for job in all_jobs:
         jid  = str(job.job_id)
         item = _enrich_job(job, parsed_map.get(jid), scores_map.get(jid))
         if verdict:
-            # NOT_SCORED jobs: match if verdict param == 'NOT_SCORED'
             job_verdict = item["verdict"] or ("NOT_SCORED" if item["score"] is None else None)
             if job_verdict != verdict:
                 continue
         enriched.append(item)
 
-    # Paginate the filtered result
-    total  = len(enriched)
-    start  = (page - 1) * limit
-    paged  = enriched[start: start + limit]
+    total = len(enriched)
+    start = (page - 1) * limit
+    paged = enriched[start: start + limit]
 
     return {
         "jobs":  paged,
@@ -122,7 +106,7 @@ async def list_jobs(
     }
 
 
-# ── JSearch connectivity test ───────────────────────────────────────────────────
+# ── JSearch connectivity test ─────────────────────────────────────────────────
 
 @router.get("/search/test", summary="Test JSearch API connectivity without ingesting")
 async def test_jsearch_connection(
@@ -132,14 +116,34 @@ async def test_jsearch_connection(
         jsearch = JSearchSource()
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     result = jsearch.test_connection()
     if not result["ok"]:
         raise HTTPException(status_code=502, detail=f"JSearch connectivity test failed: {result['detail']}")
     return result
 
 
-# ── Search & ingest ───────────────────────────────────────────────────────────────
+# ── JSearch raw debug ────────────────────────────────────────────────────────
+
+@router.get("/search/raw", summary="Debug: show raw JSearch results without ingesting")
+async def debug_raw_search(
+    keywords:    str           = Query(...),
+    location:    str           = Query("United States"),
+    date_posted: Optional[str] = Query(None),
+    num_results: int           = Query(5, ge=1, le=10),
+    current_user_id: UUID      = Depends(get_current_user),
+):
+    """Returns the exact query sent to JSearch and the raw results.
+    Use this to verify keyword expansion and diagnose empty searches.
+    """
+    try:
+        jsearch = JSearchSource()
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return jsearch.raw_search(keywords=keywords, location=location,
+                              date_posted=date_posted, num_results=num_results)
+
+
+# ── Search & ingest ───────────────────────────────────────────────────────────
 
 @router.post("/search", summary="Search and ingest jobs via JSearch API")
 async def search_and_ingest_jobs(
@@ -292,7 +296,7 @@ async def parse_all_jobs(
     return {"message": "Bulk parse complete", **results}
 
 
-# ── Single job parse ──────────────────────────────────────────────────────────────────
+# ── Single job parse ─────────────────────────────────────────────────────────────────
 
 @router.post("/{job_id}/parse")
 async def parse_job(
@@ -326,7 +330,7 @@ async def parse_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Get parsed JD ──────────────────────────────────────────────────────────────────────
+# ── Get parsed JD ────────────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}/parsed")
 async def get_parsed_job(
@@ -341,7 +345,7 @@ async def get_parsed_job(
             "parsed_jd": parsed.parsed_json, "parser_version": parsed.parser_version}
 
 
-# ── Single job detail ────────────────────────────────────────────────────────────────────
+# ── Single job detail ─────────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}", summary="Get a single job enriched with this user's score")
 async def get_job(

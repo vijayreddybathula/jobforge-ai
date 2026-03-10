@@ -9,8 +9,52 @@ logger = get_logger(__name__)
 
 JSEARCH_BASE_URL = "https://jsearch.p.rapidapi.com"
 
-# Default freshness window — only ingest jobs posted in the last week.
+# Default freshness window.
 DEFAULT_DATE_POSTED = "week"
+
+# Keyword aliases: if the user's role title contains these tokens, broaden the
+# JSearch query to a term that actually returns results.  JSearch is a Google
+# Jobs scraper — very niche compound terms like "GenAI Engineer" return 0 hits
+# even though "AI Engineer" or "Machine Learning Engineer" return hundreds.
+KEYWORD_ALIASES = {
+    "genai":              "Generative AI Engineer",
+    "gen ai":             "Generative AI Engineer",
+    "generative ai":      "Generative AI Engineer",
+    "llm":                "LLM Engineer",
+    "mlops":              "MLOps Engineer",
+    "aiops":              "AI Engineer",
+    "nlp":                "NLP Engineer",
+}
+
+
+def _expand_keywords(keywords: str) -> str:
+    """
+    Map niche/compound role titles to JSearch-friendly equivalents.
+
+    JSearch searches Google Jobs.  Very niche compound terms like
+    'GenAI Engineer' return 0 results because no employer uses that exact
+    string in their posting title.  We map them to broader equivalents that
+    still represent the same role.
+
+    Examples:
+      'Senior GenAI Engineer'  -> 'Senior Generative AI Engineer'
+      'GenAI'                  -> 'Generative AI Engineer'
+      'LLM Engineer'           -> 'LLM Engineer'  (already good)
+      'Python Developer'       -> 'Python Developer'  (unchanged)
+    """
+    kw_lower = keywords.lower()
+    for token, replacement in KEYWORD_ALIASES.items():
+        if token in kw_lower:
+            # Preserve seniority prefix (Senior / Lead / Principal / Staff)
+            seniority = ""
+            for prefix in ("principal ", "staff ", "senior ", "lead ", "jr ", "junior "):
+                if kw_lower.startswith(prefix):
+                    seniority = keywords[:len(prefix)]
+                    break
+            expanded = f"{seniority}{replacement}".strip()
+            logger.info(f"Keyword expanded: '{keywords}' -> '{expanded}'")
+            return expanded
+    return keywords
 
 
 class JSearchAPIError(Exception):
@@ -52,6 +96,37 @@ class JSearchSource:
         except Exception as e:
             return {"ok": False, "status_code": None, "detail": str(e)}
 
+    def raw_search(self, keywords: str, location: str, date_posted: Optional[str] = None, num_results: int = 5) -> Dict[str, Any]:
+        """Debug: return the raw JSearch API response without normalizing or ingesting."""
+        expanded = _expand_keywords(keywords)
+        query    = f"{expanded} in {location}" if location else expanded
+        params: Dict[str, Any] = {"query": query, "page": 1, "num_pages": 1}
+        if date_posted:
+            params["date_posted"] = date_posted
+        try:
+            r = requests.get(f"{JSEARCH_BASE_URL}/search", headers=self.headers, params=params, timeout=15)
+            data = r.json()
+            jobs = data.get("data", [])[:num_results]
+            return {
+                "query_sent": query,
+                "params": params,
+                "http_status": r.status_code,
+                "total_returned": len(data.get("data", [])),
+                "sample": [
+                    {
+                        "title":       j.get("job_title"),
+                        "company":     j.get("employer_name"),
+                        "location":    f"{j.get('job_city','')} {j.get('job_state','')} {j.get('job_country','')}".strip(),
+                        "job_url":     j.get("job_url", "")[:80],
+                        "has_job_url": bool(j.get("job_url", "").strip()),
+                        "posted_at":   j.get("job_posted_at_datetime_utc"),
+                    }
+                    for j in jobs
+                ],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     def search_jobs(
         self,
         keywords: str,
@@ -63,18 +138,20 @@ class JSearchSource:
         """
         Search jobs via JSearch and return normalized list.
 
-        date_posted defaults to 'week' to avoid returning already-closed
-        listings.  Pass date_posted=None explicitly to remove the filter.
-
-        Each returned dict contains BOTH:
-          url        — JSearch canonical URL  (used as dedup key / source_url)
-          apply_link — Direct ATS/employer apply link (what we open for the user)
+        Keywords are expanded via KEYWORD_ALIASES before sending to JSearch
+        so niche terms like 'GenAI Engineer' are mapped to broader equivalents
+        that Google Jobs (underlying JSearch) actually indexes.
         """
+        # Expand keywords to JSearch-friendly terms
+        expanded_keywords = _expand_keywords(keywords)
+        if expanded_keywords != keywords:
+            logger.info(f"Search: '{keywords}' expanded to '{expanded_keywords}'")
+
         jobs: List[Dict[str, Any]] = []
         page = 1
-        pages_needed = max(1, -(-max_results // 10))  # ceil
+        pages_needed = max(1, -(-max_results // 10))  # ceil division
 
-        query = f"{keywords} in {location}" if location else keywords
+        query = f"{expanded_keywords} in {location}" if location else expanded_keywords
 
         while len(jobs) < max_results and page <= pages_needed:
             params: Dict[str, Any] = {"query": query, "page": page, "num_pages": 1}
@@ -87,6 +164,7 @@ class JSearchSource:
                     params["remote_jobs_only"] = "true"
                 elif "remote" not in work_type.lower():
                     params["remote_jobs_only"] = "false"
+                # mixed (remote,hybrid) — omit the flag for broader results
 
             try:
                 response = requests.get(
@@ -114,6 +192,7 @@ class JSearchSource:
 
             raw_jobs = data.get("data", [])
             if not raw_jobs:
+                logger.info(f"JSearch returned 0 results for query='{query}' page={page} date_posted={date_posted}")
                 break
 
             for raw in raw_jobs:
@@ -124,21 +203,19 @@ class JSearchSource:
                     jobs.append(normalized)
             page += 1
 
-        logger.info(f"JSearch returned {len(jobs)} jobs for '{keywords}' in '{location}' (date_posted={date_posted})")
+        logger.info(
+            f"JSearch: {len(jobs)} jobs for '{expanded_keywords}' in '{location}' "
+            f"(original='{keywords}', date_posted={date_posted})"
+        )
         return jobs
 
     def _normalize(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Normalize a raw JSearch job.
 
-        CRITICAL: job_url must be non-empty — it is stored as source_url which
-        has a UNIQUE constraint in the DB.  If two jobs have empty job_url they
-        both resolve to "" and the second INSERT violates the constraint, causing
-        a silent rollback that swallows the entire batch without error counts.
-        Jobs with no job_url are skipped here.
-
-        url        = job_url  — JSearch canonical URL, stable dedup key.
-        apply_link = job_apply_link — Actual employer/ATS link shown to user.
+        job_url must be non-empty — it is stored as source_url (UNIQUE column).
+        Empty job_url causes IntegrityError on the second insert which rolls
+        back silently, swallowing the whole batch with zero error counts.
         """
         try:
             title   = raw.get("job_title", "").strip()
@@ -153,22 +230,24 @@ class JSearchSource:
                 location = f"{location} (Remote)".strip(", ")
 
             description = raw.get("job_description", "").strip()
+            job_url     = raw.get("job_url", "").strip()
 
-            # job_url is the canonical JSearch URL — must be non-empty.
-            job_url = raw.get("job_url", "").strip()
-
-            # Skip jobs with no canonical URL — they cannot be safely deduped
-            # and will break the unique constraint on source_url.
             if not job_url:
-                logger.warning(f"Skipping job with empty job_url: '{title}' @ '{company}'")
+                logger.warning(f"Skipping job with no job_url: '{title}' @ '{company}'")
+                return None
+
+            if not title or not company:
+                logger.debug(f"Skipping job missing title or company: title='{title}' company='{company}'")
+                return None
+
+            # description can be very short for some aggregator listings — keep them
+            # but log so we can monitor quality
+            if not description:
+                logger.debug(f"Job has no description: '{title}' @ '{company}' — skipping")
                 return None
 
             apply_link = (raw.get("job_apply_link") or job_url).strip()
             posted_at  = raw.get("job_posted_at_datetime_utc")
-
-            if not title or not company or not description:
-                logger.debug(f"Skipping incomplete job: title={bool(title)} company={bool(company)} desc={bool(description)}")
-                return None
 
             return {
                 "url":             job_url,
