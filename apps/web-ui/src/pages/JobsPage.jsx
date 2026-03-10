@@ -16,9 +16,9 @@ import EmptyState from '../components/common/EmptyState'
 const DATE_POSTED_OPTIONS = [
   { value: 'today',  label: 'Last 24 hours' },
   { value: '3days',  label: 'Last 3 days'   },
-  { value: 'week',   label: 'Last 7 days'   },  // default
+  { value: 'week',   label: 'Last 7 days'   },
   { value: 'month',  label: 'Last 30 days'  },
-  { value: 'any',    label: 'Any time'       },
+  { value: 'any',    label: 'Any time'      },
 ]
 
 function deriveWorkType(locPrefs) {
@@ -30,13 +30,50 @@ function deriveWorkType(locPrefs) {
   return types.length ? types.join(',') : 'remote,hybrid'
 }
 
+/**
+ * Pick the best keyword from the user's confirmed roles.
+ *
+ * Strategy:
+ *   1. Call /resume/roles/{resumeId} to get confidence_score per role.
+ *   2. Return the role_title with the highest confidence_score.
+ *   3. If that endpoint fails or returns nothing, fall back to core_roles[0].
+ *
+ * This fixes the bug where core_roles[0] was always used (alphabetical order),
+ * so "AI Solutions Architect" filled in instead of "Senior GenAI Engineer".
+ */
+async function pickBestKeyword(api) {
+  try {
+    // Get profile to find the resume_id
+    const profile = await api.get('/profile')
+    const resumes = await api.get('/resume/')
+    const resumeId = resumes?.[0]?.resume_id
+
+    if (resumeId) {
+      const rolesResp = await api.get(`/resume/roles/${resumeId}`)
+      const roles = rolesResp?.roles || []
+      if (roles.length > 0) {
+        // Sort by confidence_score descending, pick the top confirmed role first
+        const confirmed = roles.filter(r => r.is_confirmed)
+        const pool      = confirmed.length > 0 ? confirmed : roles
+        const best      = pool.sort((a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0))[0]
+        if (best?.role_title) return best.role_title
+      }
+    }
+
+    // Fallback: use first core_role from profile
+    return profile?.core_roles?.[0] || ''
+  } catch (_) {
+    return ''
+  }
+}
+
 /* ── Search modal ────────────────────────────────────────────── */
 function SearchModal({ onClose, onSuccess, api }) {
   const [form, setForm] = useState({
     keywords:    '',
     location:    '',
     work_type:   'remote,hybrid',
-    date_posted: 'week',   // sensible default — fresh jobs, not stale ones
+    date_posted: 'week',
     max_results: 10,
   })
   const [loading,     setLoading]     = useState(false)
@@ -48,16 +85,20 @@ function SearchModal({ onClose, onSuccess, api }) {
     let cancelled = false
     async function loadDefaults() {
       try {
-        const [profileResult, prefsResult] = await Promise.allSettled([
-          api.get('/profile'),
-          api.get('/preferences'),
+        const [bestKeyword, prefsResult] = await Promise.allSettled([
+          pickBestKeyword(api),
+          api.get('/preferences/'),
         ])
         if (cancelled) return
         setForm(prev => {
           const next = { ...prev }
-          if (profileResult.status === 'fulfilled' && profileResult.value?.core_roles?.length) {
-            next.keywords = profileResult.value.core_roles[0]
+
+          // Best keyword: highest-confidence confirmed role
+          if (bestKeyword.status === 'fulfilled' && bestKeyword.value) {
+            next.keywords = bestKeyword.value
           }
+
+          // Location + work type from preferences
           if (prefsResult.status === 'fulfilled' && prefsResult.value) {
             const locPrefs = prefsResult.value.location_preferences || {}
             const cities   = locPrefs.cities || []
@@ -115,7 +156,7 @@ function SearchModal({ onClose, onSuccess, api }) {
               <label className="label">Keywords</label>
               <input className="input" value={form.keywords} onChange={set('keywords')}
                 placeholder="e.g. Senior GenAI Engineer" />
-              <p className="text-xs text-slate-500 mt-1">From your confirmed role — edit freely</p>
+              <p className="text-xs text-slate-500 mt-1">Best-match confirmed role — edit freely</p>
             </div>
 
             <div>
@@ -148,7 +189,7 @@ function SearchModal({ onClose, onSuccess, api }) {
               </div>
             </div>
             <p className="text-xs text-slate-600 -mt-2">
-              "Last 24 hours" is the finest window JSearch supports — no 1-hour option exists.
+              "Last 24 hours" is the finest window JSearch supports.
             </p>
 
             <div>
@@ -166,7 +207,7 @@ function SearchModal({ onClose, onSuccess, api }) {
               }`}>
                 {result.error
                   ? `Error: ${result.error}`
-                  : `✓ Fetched ${result.total_fetched ?? 0} · Ingested ${result.ingested ?? 0} · Parsed ${result.parsed ?? 0}`
+                  : `✓ Fetched ${result.total_fetched ?? 0} · Ingested ${result.ingested ?? 0} · Dupes ${result.duplicates ?? 0} · Parsed ${result.parsed ?? 0}`
                 }
               </div>
             )}
@@ -202,13 +243,15 @@ export default function JobsPage() {
     setLoading(true)
     setApiError('')
     try {
-      const data = await api.get('/jobs/?page=1&limit=50')
+      // Pass verdict filter to backend so total reflects filtered count
+      const params = filter !== 'all' ? `?verdict=${filter}&limit=50` : '?page=1&limit=50'
+      const data = await api.get(`/jobs/${params}`)
       setJobs(data.jobs || [])
       setTotal(data.total || 0)
     } catch (e) {
       setApiError(e.message)
     } finally { setLoading(false) }
-  }, [api])
+  }, [api, filter])
 
   useEffect(() => { loadJobs() }, [loadJobs])
 
@@ -249,22 +292,20 @@ export default function JobsPage() {
     { id: 'SKIP',                 label: 'Skip' },
   ]
 
-  const filtered = jobs.filter(j => {
-    const verdict = j.verdict || (j.score == null ? 'NOT_SCORED' : null)
-    if (filter !== 'all' && verdict !== filter) return false
-    if (search) {
-      const q = search.toLowerCase()
-      if (!`${j.title || ''} ${j.company || ''} ${j.parsed_role || ''}`.toLowerCase().includes(q)) return false
-    }
-    return true
-  })
+  // Client-side title search filter (verdict is now server-side)
+  const filtered = search
+    ? jobs.filter(j => {
+        const q = search.toLowerCase()
+        return `${j.title || ''} ${j.company || ''} ${j.parsed_role || ''}`.toLowerCase().includes(q)
+      })
+    : jobs
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Job Pipeline</h1>
-          <p className="text-slate-400 text-sm mt-1">{total} jobs in catalog</p>
+          <p className="text-slate-400 text-sm mt-1">{total} jobs{filter !== 'all' ? ` matching “${filter}”` : ' in catalog'}</p>
         </div>
         <div className="flex gap-2">
           <button onClick={handleScoreAll} disabled={scoring}
@@ -340,9 +381,9 @@ export default function JobsPage() {
                   <div className="flex gap-1.5 mt-1.5 flex-wrap">
                     <span className="text-xs text-slate-500 bg-surface px-2 py-0.5 rounded border border-surface-border">{job.source}</span>
                     <span className="text-xs text-slate-500 bg-surface px-2 py-0.5 rounded border border-surface-border">{job.parse_status}</span>
-                    {job.posted_at && (
+                    {job.date_posted && (
                       <span className="text-xs text-slate-600 bg-surface px-2 py-0.5 rounded border border-surface-border">
-                        {new Date(job.posted_at).toLocaleDateString()}
+                        {job.date_posted}
                       </span>
                     )}
                   </div>

@@ -26,8 +26,7 @@ _normalizer       = JobNormalizer()
 
 def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobScore]) -> dict:
     """Build the standard job dict enriched with parsed data and user score."""
-    # apply_link is the direct ATS link; fall back to source_url for old rows
-    apply_link = job.apply_link or str(job.source_url) if job.source_url else None
+    apply_link = job.apply_link or (str(job.source_url) if job.source_url else None)
     return {
         "job_id":       str(job.job_id),
         "title":        job.title,
@@ -36,7 +35,10 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
         "source":       job.source,
         "source_url":   str(job.source_url) if job.source_url else None,
         "apply_link":   apply_link,
+        # posted_at is the employer-reported date; created_at is when we ingested it.
+        # The UI date chip reads posted_at — expose both so the UI can choose.
         "posted_at":    job.posted_at.isoformat() if job.posted_at else None,
+        "date_posted":  job.posted_at.strftime("%m/%d/%Y") if job.posted_at else None,
         "created_at":   job.created_at.isoformat(),
         "parse_status": parsed.parse_status if parsed else "NOT_PARSED",
         "parsed_role":  parsed.parsed_json.get("role") if parsed and parsed.parsed_json else None,
@@ -47,7 +49,7 @@ def _enrich_job(job: JobRaw, parsed: Optional[JobParsed], score: Optional[JobSco
     }
 
 
-# ── List ─────────────────────────────────────────────────────────────────────
+# ── List ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/", summary="List all jobs with current user's score status")
 async def list_jobs(
@@ -58,7 +60,16 @@ async def list_jobs(
     current_user_id: UUID      = Depends(get_current_user),
     db: Session                = Depends(get_db),
 ):
+    """
+    List jobs with the current user's scoring status.
+
+    FIX: verdict filter is now applied at the DB/join level so that `total`
+    reflects the actual number of matching jobs, not the raw job count.
+    Previously total=7 but only 1 card showed because filter ran post-pagination.
+    """
+    # Base query
     query = db.query(JobRaw)
+
     if parsed_only:
         parsed_ids = {
             p.job_id for p in
@@ -66,32 +77,52 @@ async def list_jobs(
         }
         query = query.filter(JobRaw.job_id.in_(parsed_ids))
 
-    total = query.count()
-    jobs  = query.order_by(JobRaw.created_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    # Load ALL jobs (no pagination yet) so we can join scores and filter by verdict
+    all_jobs = query.order_by(JobRaw.created_at.desc()).all()
 
-    job_ids    = [j.job_id for j in jobs]
-    scores     = {
+    if not all_jobs:
+        return {"jobs": [], "total": 0, "page": page, "limit": limit, "pages": 0}
+
+    job_ids    = [j.job_id for j in all_jobs]
+    scores_map = {
         str(s.job_id): s for s in
-        db.query(JobScore).filter(JobScore.user_id == current_user_id, JobScore.job_id.in_(job_ids)).all()
+        db.query(JobScore).filter(
+            JobScore.user_id == current_user_id,
+            JobScore.job_id.in_(job_ids),
+        ).all()
     }
     parsed_map = {
         str(p.job_id): p for p in
         db.query(JobParsed).filter(JobParsed.job_id.in_(job_ids)).all()
     }
 
-    result = []
-    for job in jobs:
+    # Build enriched list and apply verdict filter BEFORE pagination
+    enriched = []
+    for job in all_jobs:
         jid  = str(job.job_id)
-        item = _enrich_job(job, parsed_map.get(jid), scores.get(jid))
-        if verdict and item["verdict"] != verdict:
-            continue
-        result.append(item)
+        item = _enrich_job(job, parsed_map.get(jid), scores_map.get(jid))
+        if verdict:
+            # NOT_SCORED jobs: match if verdict param == 'NOT_SCORED'
+            job_verdict = item["verdict"] or ("NOT_SCORED" if item["score"] is None else None)
+            if job_verdict != verdict:
+                continue
+        enriched.append(item)
 
-    return {"jobs": result, "total": total, "page": page, "limit": limit,
-            "pages": (total + limit - 1) // limit}
+    # Paginate the filtered result
+    total  = len(enriched)
+    start  = (page - 1) * limit
+    paged  = enriched[start: start + limit]
+
+    return {
+        "jobs":  paged,
+        "total": total,
+        "page":  page,
+        "limit": limit,
+        "pages": (total + limit - 1) // limit if total else 0,
+    }
 
 
-# ── JSearch connectivity test ─────────────────────────────────────────────────
+# ── JSearch connectivity test ───────────────────────────────────────────────────
 
 @router.get("/search/test", summary="Test JSearch API connectivity without ingesting")
 async def test_jsearch_connection(
@@ -108,15 +139,13 @@ async def test_jsearch_connection(
     return result
 
 
-# ── Search & ingest ───────────────────────────────────────────────────────────
+# ── Search & ingest ───────────────────────────────────────────────────────────────
 
 @router.post("/search", summary="Search and ingest jobs via JSearch API")
 async def search_and_ingest_jobs(
     keywords:      str           = Query(...),
     location:      str           = Query("United States"),
     work_type:     Optional[str] = Query(None),
-    # Default to 'week' — avoids persisting already-closed listings.
-    # Callers can pass date_posted=month or date_posted=None for broader results.
     date_posted:   str           = Query(DEFAULT_DATE_POSTED),
     max_results:   int           = Query(20, ge=1, le=50),
     auto_parse:    bool          = Query(True),
@@ -207,19 +236,19 @@ async def search_and_ingest_jobs(
 
     return {
         "message": "Job search and ingestion complete",
-        "keywords":     keywords,
-        "location":     location,
-        "date_posted":  date_posted,
+        "keywords":      keywords,
+        "location":      location,
+        "date_posted":   date_posted,
         "total_fetched": len(raw_jobs),
-        "ingested":     ingest_result.get("ingested", 0),
-        "duplicates":   ingest_result.get("duplicates", 0),
-        "parsed":       parse_results["parsed"],
-        "reparsed":     parse_results["reparsed"],
-        "job_ids":      [str(jid) for jid in all_candidate_ids],
+        "ingested":      ingest_result.get("ingested", 0),
+        "duplicates":    ingest_result.get("duplicates", 0),
+        "parsed":        parse_results["parsed"],
+        "reparsed":      parse_results["reparsed"],
+        "job_ids":       [str(jid) for jid in all_candidate_ids],
     }
 
 
-# ── Bulk parse ────────────────────────────────────────────────────────────────
+# ── Bulk parse ────────────────────────────────────────────────────────────────────
 
 @router.post("/parse-all", summary="Parse all unparsed jobs in the catalog")
 async def parse_all_jobs(
@@ -263,7 +292,7 @@ async def parse_all_jobs(
     return {"message": "Bulk parse complete", **results}
 
 
-# ── Single job parse ──────────────────────────────────────────────────────────
+# ── Single job parse ──────────────────────────────────────────────────────────────────
 
 @router.post("/{job_id}/parse")
 async def parse_job(
@@ -297,7 +326,7 @@ async def parse_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Get parsed JD ─────────────────────────────────────────────────────────────
+# ── Get parsed JD ──────────────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}/parsed")
 async def get_parsed_job(
@@ -312,7 +341,7 @@ async def get_parsed_job(
             "parsed_jd": parsed.parsed_json, "parser_version": parsed.parser_version}
 
 
-# ── Single job detail ─────────────────────────────────────────────────────────
+# ── Single job detail ────────────────────────────────────────────────────────────────────
 
 @router.get("/{job_id}", summary="Get a single job enriched with this user's score")
 async def get_job(
