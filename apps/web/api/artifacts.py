@@ -1,202 +1,166 @@
-"""Artifacts API endpoints."""
+"""Artifacts API — user_id from auth."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from uuid import UUID
 from typing import List
+from uuid import UUID
 
 from packages.database.connection import get_db
-from packages.database.models import (
-    JobRaw,
-    JobParsed,
-    UserProfile,
-    UserPreferences,
-    Artifact,
-    JobScore,
-)
-from services.artifacts.resume_tailor import ResumeTailor
+from packages.database.models import JobRaw, JobParsed, Resume, UserProfile, Artifact
 from services.artifacts.pitch_generator import PitchGenerator
+from services.artifacts.resume_tailor import ResumeTailor
 from services.artifacts.answers_generator import AnswersGenerator
-from packages.schemas.jd_schema import ParsedJD
+from apps.web.auth import get_current_user
 from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
-
 router = APIRouter(prefix="/jobs", tags=["artifacts"])
 
+pitch_gen = PitchGenerator()
 resume_tailor = ResumeTailor()
-pitch_generator = PitchGenerator()
-answers_generator = AnswersGenerator()
+answers_gen = AnswersGenerator()
+
+ARTIFACT_TYPES = {"pitch", "resume", "answers"}
 
 
 @router.post("/{job_id}/artifacts/generate")
 async def generate_artifacts(
     job_id: UUID,
-    user_id: UUID,  # TODO: Get from authenticated user
-    artifact_types: List[str],  # ["resume", "pitch", "answers"]
+    artifact_types: List[str] = Query(default=["pitch", "resume", "answers"]),
+    current_user_id: UUID = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate artifacts for job application."""
-    # Get job and parsed JD
+    """
+    Generate application artifacts for the authenticated user.
+    Uses the user's own resume + profile. Completely isolated per user.
+    """
+    invalid = set(artifact_types) - ARTIFACT_TYPES
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown artifact types: {invalid}")
+
     job = db.query(JobRaw).filter(JobRaw.job_id == job_id).first()
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Job not found")
 
     parsed = db.query(JobParsed).filter(JobParsed.job_id == job_id).first()
     if not parsed or parsed.parse_status != "PARSED":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Job not parsed")
+        raise HTTPException(status_code=400, detail="Job must be parsed first.")
 
-    # Get user profile
-    user_profile = db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+    # Get the user's most recent resume
+    resume = (
+        db.query(Resume)
+        .filter(Resume.user_id == current_user_id)
+        .order_by(Resume.created_at.desc())
+        .first()
+    )
+    if not resume or not resume.parsed_data:
+        raise HTTPException(
+            status_code=404,
+            detail="No parsed resume found. Upload and analyze a resume first.",
+        )
+
+    user_profile = db.query(UserProfile).filter(UserProfile.user_id == current_user_id).first()
     if not user_profile:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User profile not found")
+        raise HTTPException(status_code=404, detail="User profile not found.")
 
-    user_preferences = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
-
+    from packages.schemas.jd_schema import ParsedJD
     parsed_jd = ParsedJD(**parsed.parsed_json)
 
-    artifacts = []
+    resume_text = str(resume.parsed_data)
+    user_profile_dict = {
+        "core_roles": user_profile.core_roles,
+        "skills": user_profile.skills,
+    }
 
-    # Generate requested artifacts
-    for artifact_type in artifact_types:
-        if artifact_type == "resume":
-            # Get base resume (simplified - in production, get from user's resumes)
-            base_resume_path = "./storage/resumes/base.pdf"  # Placeholder
+    artifacts = {}
+    errors = {}
 
-            result = resume_tailor.tailor_resume(
-                base_resume_path=base_resume_path,
+    if "pitch" in artifact_types:
+        try:
+            pitch = pitch_gen.generate_pitch(
+                resume_text=resume_text,
                 parsed_jd=parsed_jd,
-                user_skills=user_profile.skills or {},
-                output_path=f"./storage/artifacts/{job_id}_{user_id}_resume.pdf",
+                user_profile=user_profile_dict,
             )
+            artifacts["pitch"] = pitch
+            _upsert_artifact(db, job_id, current_user_id, "pitch", {"content": pitch})
+        except Exception as e:
+            errors["pitch"] = str(e)
 
-            artifact = Artifact(
-                job_id=job_id,
-                user_id=user_id,
-                artifact_type="resume",
-                path=result["output_path"],
-                metadata=result,
+    if "resume" in artifact_types:
+        try:
+            tailored = resume_tailor.tailor_resume(
+                resume_text=resume_text,
+                parsed_jd=parsed_jd,
+                user_profile=user_profile_dict,
             )
-            db.add(artifact)
-            artifacts.append({"type": "resume", "path": result["output_path"], "metadata": result})
+            artifacts["resume"] = tailored
+            _upsert_artifact(db, job_id, current_user_id, "resume", tailored)
+        except Exception as e:
+            errors["resume"] = str(e)
 
-        elif artifact_type == "pitch":
-            # Get score for pitch generation
-            score = (
-                db.query(JobScore)
-                .filter(JobScore.job_id == job_id, JobScore.user_id == user_id)
-                .first()
+    if "answers" in artifact_types:
+        try:
+            answers = answers_gen.generate_answers(
+                resume_text=resume_text,
+                parsed_jd=parsed_jd,
+                user_profile=user_profile_dict,
             )
+            artifacts["answers"] = answers
+            _upsert_artifact(db, job_id, current_user_id, "answers", {"content": answers})
+        except Exception as e:
+            errors["answers"] = str(e)
 
-            score_value = score.total_score if score else 75
-
-            pitch = pitch_generator.generate(
-                parsed_jd=parsed_jd, user_skills=user_profile.skills or {}, score=score_value
-            )
-
-            # Save pitch
-            pitch_path = f"./storage/artifacts/{job_id}_{user_id}_pitch.txt"
-            from pathlib import Path
-
-            Path(pitch_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(pitch_path).write_text(pitch)
-
-            artifact = Artifact(
-                job_id=job_id,
-                user_id=user_id,
-                artifact_type="pitch",
-                path=pitch_path,
-                metadata={"length": len(pitch)},
-            )
-            db.add(artifact)
-            artifacts.append(
-                {"type": "pitch", "path": pitch_path, "metadata": {"length": len(pitch)}}
-            )
-
-        elif artifact_type == "answers":
-            # Generate answers for common questions
-            user_data = {
-                "years_of_experience": 5,  # TODO: Extract from profile
-                "salary_min_usd": user_preferences.salary_min_usd if user_preferences else None,
-                "visa_status": user_preferences.visa_status if user_preferences else "",
-                "location_preferences": (
-                    user_preferences.location_preferences if user_preferences else {}
-                ),
-            }
-
-            answers = {}
-            for question_key, question_text in AnswersGenerator.COMMON_QUESTIONS.items():
-                answers[question_key] = answers_generator.generate_answer(question_text, user_data)
-
-            # Save answers
-            answers_path = f"./storage/artifacts/{job_id}_{user_id}_answers.json"
-            from pathlib import Path
-            import json
-
-            Path(answers_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(answers_path).write_text(json.dumps(answers, indent=2))
-
-            artifact = Artifact(
-                job_id=job_id,
-                user_id=user_id,
-                artifact_type="answers",
-                path=answers_path,
-                metadata={"questions_count": len(answers)},
-            )
-            db.add(artifact)
-            artifacts.append(
-                {
-                    "type": "answers",
-                    "path": answers_path,
-                    "metadata": {"questions_count": len(answers)},
-                }
-            )
-
-    db.commit()
-
-    logger.info(f"Artifacts generated for job {job_id}: {artifact_types}")
-
-    return {"job_id": job_id, "artifacts": artifacts}
+    return {
+        "job_id": str(job_id),
+        "user_id": str(current_user_id),
+        "artifacts": artifacts,
+        "errors": errors if errors else None,
+    }
 
 
 @router.get("/{job_id}/artifacts")
-async def list_artifacts(
-    job_id: UUID, user_id: UUID, db: Session = Depends(get_db)  # TODO: Get from authenticated user
+async def get_artifacts(
+    job_id: UUID,
+    current_user_id: UUID = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """List artifacts for job."""
-    artifacts = (
-        db.query(Artifact).filter(Artifact.job_id == job_id, Artifact.user_id == user_id).all()
+    """Get previously generated artifacts for this user + job."""
+    arts = (
+        db.query(Artifact)
+        .filter(Artifact.job_id == job_id, Artifact.user_id == current_user_id)
+        .all()
     )
+    if not arts:
+        return {"job_id": str(job_id), "artifacts": {}, "message": "No artifacts yet. Call POST .../generate"}
 
-    return [
-        {
-            "artifact_id": str(a.artifact_id),
-            "type": a.artifact_type,
-            "path": a.path,
-            "metadata": a.metadata,
-            "created_at": a.created_at.isoformat(),
-        }
-        for a in artifacts
-    ]
+    return {
+        "job_id": str(job_id),
+        "user_id": str(current_user_id),
+        "artifacts": {a.artifact_type: a.artifact_metadata for a in arts},
+        "generated_at": max(a.created_at for a in arts).isoformat(),
+    }
 
 
-@router.get("/artifacts/{artifact_id}/download")
-async def download_artifact(artifact_id: UUID, db: Session = Depends(get_db)):
-    """Download artifact file."""
-    artifact = db.query(Artifact).filter(Artifact.artifact_id == artifact_id).first()
-
-    if not artifact:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
-
-    from pathlib import Path
-
-    file_path = Path(artifact.path)
-
-    if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact file not found")
-
-    from fastapi.responses import FileResponse
-
-    return FileResponse(
-        path=str(file_path), filename=file_path.name, media_type="application/octet-stream"
+def _upsert_artifact(db, job_id, user_id, artifact_type, metadata):
+    existing = (
+        db.query(Artifact)
+        .filter(
+            Artifact.job_id == job_id,
+            Artifact.user_id == user_id,
+            Artifact.artifact_type == artifact_type,
+        )
+        .first()
     )
+    if existing:
+        existing.artifact_metadata = metadata
+        existing.path = f"inline:{job_id}:{artifact_type}"
+    else:
+        db.add(Artifact(
+            job_id=job_id,
+            user_id=user_id,
+            artifact_type=artifact_type,
+            path=f"inline:{job_id}:{artifact_type}",
+            artifact_metadata=metadata,
+        ))
+    db.commit()

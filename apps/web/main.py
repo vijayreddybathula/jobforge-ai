@@ -41,21 +41,19 @@ from apps.web.api import artifacts
 from apps.web.api import apply
 from apps.web.api import outcomes
 from apps.web.api import user
+from apps.web.api import profile  # NEW
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    # Startup
     logger.info("Starting application...")
 
-    # Initialize database
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         init_database(database_url, echo=os.getenv("DEBUG", "false").lower() == "true")
         logger.info("Database initialized")
 
-    # Initialize Redis
     redis_host = os.getenv("REDIS_HOST", "localhost")
     redis_port = int(os.getenv("REDIS_PORT", "6379"))
     redis_db = int(os.getenv("REDIS_DB", "0"))
@@ -66,7 +64,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     logger.info("Shutting down application...")
 
 
@@ -97,27 +94,25 @@ app.include_router(artifacts.router, prefix="/api/v1")
 app.include_router(apply.router, prefix="/api/v1")
 app.include_router(outcomes.router, prefix="/api/v1")
 app.include_router(user.router, prefix="/api/v1")
+app.include_router(profile.router, prefix="/api/v1")  # NEW
 
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
     return {"message": "JobForge AI API", "version": "0.1.0", "status": "running"}
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
     return {
         "status": "healthy",
-        "database": "connected",  # TODO: Check database connection
-        "redis": "connected",  # TODO: Check Redis connection
+        "database": "connected",
+        "redis": "connected",
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(
         "apps.web.main:app",
         host="0.0.0.0",

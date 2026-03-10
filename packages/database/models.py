@@ -36,7 +36,6 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationships
     resumes = relationship("Resume", back_populates="user")
     user_profiles = relationship("UserProfile", back_populates="user")
     user_preferences = relationship("UserPreferences", back_populates="user")
@@ -50,15 +49,14 @@ class Resume(Base):
 
     resume_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
-    version = Column(Integer, default=1)  # Version number for this user's resumes
+    version = Column(Integer, default=1)
     file_path = Column(String(500), nullable=False)
     file_name = Column(String(255), nullable=False)
-    file_type = Column(String(50))  # pdf, docx
+    file_type = Column(String(50))
     content_hash = Column(String(64), unique=True, index=True)
-    parsed_data = Column(JSONB)  # Structured parsed resume data
+    parsed_data = Column(JSONB)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="resumes")
     role_matches = relationship("RoleMatch", back_populates="resume")
 
@@ -73,11 +71,10 @@ class RoleMatch(Base):
         UUID(as_uuid=True), ForeignKey("resumes.resume_id"), nullable=False, index=True
     )
     role_title = Column(String(255), nullable=False)
-    confidence_score = Column(Integer)  # 0-100
+    confidence_score = Column(Integer)
     is_confirmed = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     resume = relationship("Resume", back_populates="role_matches")
 
 
@@ -90,13 +87,12 @@ class UserProfile(Base):
     user_id = Column(
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True
     )
-    core_roles = Column(JSONB)  # List of role titles
-    skills = Column(JSONB)  # Nested structure: languages, frameworks, etc.
-    approved_bullets = Column(JSONB)  # List of approved resume bullets
+    core_roles = Column(JSONB)
+    skills = Column(JSONB)
+    approved_bullets = Column(JSONB)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="user_profiles")
 
 
@@ -110,7 +106,7 @@ class UserPreferences(Base):
         UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, unique=True, index=True
     )
     visa_status = Column(String(100))
-    location_preferences = Column(JSONB)  # remote/hybrid/onsite, cities
+    location_preferences = Column(JSONB)
     disability_status = Column(String(100))
     disability_accommodations = Column(Text)
     salary_min_usd = Column(Integer)
@@ -119,11 +115,10 @@ class UserPreferences(Base):
     industry_preferences = Column(JSONB)
     work_authorization = Column(String(100))
     other_constraints = Column(JSONB)
-    is_ready = Column(Boolean, default=False)  # Profile ready for job ingestion
+    is_ready = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationships
     user = relationship("User", back_populates="user_preferences")
 
 
@@ -134,7 +129,7 @@ class IngestionSource(Base):
 
     source_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
-    source_type = Column(String(50), nullable=False)  # linkedin, workday, glassdoor, company_portal
+    source_type = Column(String(50), nullable=False)
     source_url = Column(String(1000), nullable=False)
     is_active = Column(Boolean, default=True)
     last_run_at = Column(DateTime(timezone=True))
@@ -156,7 +151,7 @@ class ScrapingSession(Base):
     jobs_ingested = Column(Integer, default=0)
     jobs_duplicates = Column(Integer, default=0)
     jobs_failed = Column(Integer, default=0)
-    status = Column(String(50), default="running")  # running, completed, failed
+    status = Column(String(50), default="running")
     error_message = Column(Text)
     started_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     completed_at = Column(DateTime(timezone=True))
@@ -168,8 +163,12 @@ class JobRaw(Base):
     __tablename__ = "jobs_raw"
 
     job_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
-    source = Column(String(50), nullable=False, index=True)  # linkedin, workday, etc.
+    source = Column(String(50), nullable=False, index=True)
+    # source_url: canonical dedup URL (JSearch job_url or original URL)
     source_url = Column(String(1000), unique=True, nullable=False, index=True)
+    # apply_link: direct ATS / employer application URL (may differ from source_url)
+    # Nullable so existing rows without it still work; UI falls back to source_url.
+    apply_link = Column(String(1000), nullable=True)
     company = Column(String(255), index=True)
     title = Column(String(500), index=True)
     location = Column(String(255))
@@ -177,12 +176,9 @@ class JobRaw(Base):
     html_snapshot_path = Column(String(500))
     text_content = Column(Text)
     content_hash = Column(String(64), unique=True, index=True)
-    ingest_status = Column(
-        String(50), default="INGESTED", index=True
-    )  # INGESTED, DUPLICATE, FAILED
+    ingest_status = Column(String(50), default="INGESTED", index=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     parsed = relationship("JobParsed", back_populates="job", uselist=False)
     scores = relationship("JobScore", back_populates="job")
     applications = relationship("Application", back_populates="job")
@@ -199,10 +195,9 @@ class JobParsed(Base):
     )
     parsed_json = Column(JSONB, nullable=False)
     parser_version = Column(String(50))
-    parse_status = Column(String(50), default="PARSED", index=True)  # PARSED, PARSE_FAILED
+    parse_status = Column(String(50), default="PARSED", index=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     job = relationship("JobRaw", back_populates="parsed")
 
 
@@ -214,16 +209,13 @@ class JobScore(Base):
     score_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
-    total_score = Column(Integer, nullable=False, index=True)  # 0-100
-    breakdown = Column(JSONB)  # Score breakdown by category
-    verdict = Column(
-        String(50), nullable=False, index=True
-    )  # SKIP, VALIDATE, ASSISTED_APPLY, ELIGIBLE_AUTO_SUBMIT
+    total_score = Column(Integer, nullable=False, index=True)
+    breakdown = Column(JSONB)
+    verdict = Column(String(50), nullable=False, index=True)
     rationale = Column(Text)
     scoring_version = Column(String(50))
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     job = relationship("JobRaw", back_populates="scores")
 
     __table_args__ = (Index("idx_job_user_score", "job_id", "user_id", "total_score"),)
@@ -237,9 +229,9 @@ class Artifact(Base):
     artifact_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
-    artifact_type = Column(String(50), nullable=False, index=True)  # resume, answers, pitch
+    artifact_type = Column(String(50), nullable=False, index=True)
     path = Column(String(500), nullable=False)
-    artifact_metadata = Column(JSONB)  # bullet IDs, keyword coverage, etc.
+    artifact_metadata = Column(JSONB)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
     __table_args__ = (Index("idx_artifact_job_type", "job_id", "artifact_type"),)
@@ -253,13 +245,12 @@ class Application(Base):
     application_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs_raw.job_id"), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
-    apply_mode = Column(String(50), nullable=False)  # manual, assisted, auto
-    status = Column(String(50), default="started", index=True)  # started, submitted, failed
+    apply_mode = Column(String(50), nullable=False)
+    status = Column(String(50), default="started", index=True)
     submitted_at = Column(DateTime(timezone=True))
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
 
-    # Relationships
     job = relationship("JobRaw", back_populates="applications")
     user = relationship("User", back_populates="applications")
     outcomes = relationship("Outcome", back_populates="application")
@@ -274,10 +265,9 @@ class Outcome(Base):
     application_id = Column(
         UUID(as_uuid=True), ForeignKey("applications.application_id"), nullable=False, index=True
     )
-    stage = Column(String(50), nullable=False, index=True)  # rejected, phone_screen, onsite, offer
+    stage = Column(String(50), nullable=False, index=True)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow)
-    source = Column(String(50))  # email, manual
+    source = Column(String(50))
     details = Column(JSONB)
 
-    # Relationships
     application = relationship("Application", back_populates="outcomes")

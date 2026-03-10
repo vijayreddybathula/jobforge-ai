@@ -1,57 +1,66 @@
 """Rules engine for hard constraint checking."""
 
-from typing import Dict, Any, Optional
 from packages.database.models import UserPreferences
 from packages.schemas.jd_schema import ParsedJD
 from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Salary values below this are almost certainly bad parses.
+MIN_CREDIBLE_SALARY = 10_000
+
 
 class RulesEngine:
     """Engine for checking hard constraints before scoring."""
 
     def check_constraints(self, parsed_jd: ParsedJD, user_preferences: UserPreferences):
-        """Check hard constraints.
-
-        Args:
-            parsed_jd: Parsed job description
-            user_preferences: User preferences
-
-        Returns:
-            Tuple of (is_allowed, rejection_reason)
         """
-        # Check visa requirements
+        Returns (is_allowed: bool, rejection_reason: str | None).
+        Only rejects when CONFIDENT the job fails a hard constraint.
+        """
+
+        # ── Visa / citizenship ────────────────────────────────────────────────
         if parsed_jd.red_flags:
             for flag in parsed_jd.red_flags:
-                if "citizenship" in flag.lower() or "security clearance" in flag.lower():
+                fl = flag.lower()
+                if "citizenship" in fl or "security clearance" in fl:
                     if (
                         user_preferences.visa_status
                         and "citizen" not in user_preferences.visa_status.lower()
                     ):
-                        return (
-                            False,
-                            f"Job requires {flag} but user visa status is {user_preferences.visa_status}",
-                        )
+                        return False, f"Job requires {flag} but your visa status is {user_preferences.visa_status}"
 
-        # Check location constraints
+        # ── Location (remote-only hard constraint) ────────────────────────────
+        # Reads the correct key saved by PreferencesPage: 'remote' not 'remote_only'.
+        # Only hard-rejects if user explicitly wants remote-only (remote=True AND
+        # hybrid=False AND onsite=False) and the job is definitely onsite.
         if user_preferences.location_preferences:
-            loc_prefs = user_preferences.location_preferences
-            if isinstance(loc_prefs, dict):
-                remote_only = loc_prefs.get("remote_only", False)
-                if remote_only and parsed_jd.location_type.value not in ["Remote", "Unknown"]:
-                    return False, "User requires remote but job is not remote"
+            loc = user_preferences.location_preferences
+            if isinstance(loc, dict):
+                remote_ok = loc.get("remote", False)
+                hybrid_ok = loc.get("hybrid", False)
+                onsite_ok = loc.get("onsite", False)
+                # Only hard-reject if user is remote-only AND job is confirmed onsite
+                user_remote_only = remote_ok and not hybrid_ok and not onsite_ok
+                if user_remote_only:
+                    jd_loc = parsed_jd.location_type.value if parsed_jd.location_type else "Unknown"
+                    if jd_loc not in ("Remote", "Unknown"):
+                        return False, "You require remote work but this job is not remote."
 
-        # Check salary floor
+        # ── Salary floor ──────────────────────────────────────────────────────
         if user_preferences.salary_min_usd and parsed_jd.salary_range:
-            if (
-                parsed_jd.salary_range.max
-                and parsed_jd.salary_range.max < user_preferences.salary_min_usd
-            ):
-                return (
-                    False,
-                    f"Job max salary ${parsed_jd.salary_range.max} is below user minimum ${user_preferences.salary_min_usd}",
-                )
+            job_max = parsed_jd.salary_range.max
+            if job_max is not None:
+                if job_max < MIN_CREDIBLE_SALARY:
+                    logger.warning(
+                        f"Ignoring suspicious salary max ${job_max:.0f} "
+                        f"(below credibility threshold ${MIN_CREDIBLE_SALARY:,}) — "
+                        "treating as unknown."
+                    )
+                elif job_max < user_preferences.salary_min_usd:
+                    return (
+                        False,
+                        f"Job max salary ${job_max:,.0f} is below your minimum ${user_preferences.salary_min_usd:,.0f}.",
+                    )
 
-        # All constraints passed
         return True, None

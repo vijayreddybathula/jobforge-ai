@@ -1,73 +1,102 @@
-"""Short answers generator for screening questions."""
+"""Application answers generator using Azure OpenAI."""
 
-from typing import List, Dict, Any
+import os
+from typing import Dict, Any
+from openai import AzureOpenAI
+from packages.schemas.jd_schema import ParsedJD
 from packages.common.logging import get_logger
 
 logger = get_logger(__name__)
 
 
 class AnswersGenerator:
-    """Generate answers for common screening questions."""
+    """Generate answers to common job application questions using Azure OpenAI."""
 
     COMMON_QUESTIONS = {
-        "years_of_experience": "How many years of experience do you have?",
-        "availability": "When are you available to start?",
-        "salary_expectation": "What are your salary expectations?",
-        "visa_status": "Do you require visa sponsorship?",
-        "location": "Are you willing to relocate?",
-        "remote": "Are you open to remote work?",
+        "why_interested": "Why are you interested in this role?",
+        "why_company": "Why do you want to work at this company?",
+        "strengths": "What are your greatest strengths relevant to this role?",
+        "experience_summary": "Briefly describe your relevant experience.",
+        "availability": "When can you start?",
+        "salary_expectations": "What are your salary expectations?",
     }
 
-    def generate_answer(self, question: str, user_data: Dict[str, Any]) -> str:
-        """Generate answer for a question.
+    def __init__(self):
+        self.client = AzureOpenAI(
+            api_key=os.getenv("AZURE_OPENAPI_KEY"),
+            azure_endpoint=os.getenv("AZURE_OPENAPI_ENDPOINT"),
+            api_version=os.getenv("AZURE_OPENAPI_VERSION", "2024-06-01-preview"),
+        )
+        self.model = os.getenv("AZURE_OPENAPI_DEPLOYMENT", "GPT-4")
+
+    def generate_answers(
+        self,
+        parsed_jd: ParsedJD,
+        user_profile: Dict[str, Any],
+        user_preferences: Dict[str, Any],
+        resume_text: str = "",
+    ) -> Dict[str, str]:
+        """Generate answers to all common application questions.
 
         Args:
-            question: Question text
-            user_data: User data (preferences, profile, etc.)
+            parsed_jd: Parsed job description
+            user_profile: User profile with skills and roles
+            user_preferences: User preferences (salary, visa etc)
+            resume_text: Resume text for context
 
         Returns:
-            Answer text
+            Dict of question_key -> answer text
         """
-        question_lower = question.lower()
+        core_roles = ", ".join(user_profile.get("core_roles", []))
+        skills_summary = ", ".join(
+            user_profile.get("skills", {}).get("genai", [])[:4] +
+            user_profile.get("skills", {}).get("languages", [])[:3]
+        )
+        salary_min = user_preferences.get("salary_min_usd", "not specified")
+        salary_max = user_preferences.get("salary_max_usd", "not specified")
+        visa = user_preferences.get("visa_status", "not specified")
 
-        # Years of experience
-        if "experience" in question_lower or "years" in question_lower:
-            years = user_data.get("years_of_experience", "several")
-            return f"I have {years} years of professional experience in software development."
+        prompt = f"""You are a career coach helping a candidate answer job application questions.
 
-        # Availability
-        if "available" in question_lower or "start" in question_lower:
-            return (
-                "I am available to start within 2-4 weeks, depending on notice period requirements."
+Job Details:
+- Role: {parsed_jd.role}
+- Company context: {parsed_jd.role} position
+- Required skills: {', '.join(parsed_jd.must_have_skills[:6])}
+
+Candidate Profile:
+- Current roles: {core_roles}
+- Key skills: {skills_summary}
+- Salary range: ${salary_min:,} - ${salary_max:,} if isinstance(salary_min, int) else f'{salary_min} - {salary_max}'
+- Visa status: {visa}
+
+Resume context:
+{resume_text[:1000]}
+
+Generate concise, authentic answers (2-4 sentences each) for these questions:
+1. why_interested: Why are you interested in this role?
+2. why_company: Why do you want to work here?
+3. strengths: What are your greatest strengths for this role?
+4. experience_summary: Briefly describe your relevant experience.
+5. availability: When can you start? (assume 2 weeks notice)
+6. salary_expectations: What are your salary expectations?
+
+Return as JSON with question keys as above. Keep answers honest, specific, and professional."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a career coach. Always return valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.5,
+                max_tokens=800,
             )
-
-        # Salary
-        if "salary" in question_lower or "compensation" in question_lower:
-            min_salary = user_data.get("salary_min_usd")
-            if min_salary:
-                return f"My salary expectations are in the range of ${min_salary:,}+, depending on the total compensation package."
-            return "I'm open to discussing compensation based on the role and total package."
-
-        # Visa
-        if "visa" in question_lower or "sponsorship" in question_lower:
-            visa_status = user_data.get("visa_status", "")
-            if "h1b" in visa_status.lower():
-                return (
-                    "I currently hold H1B status and would require sponsorship for a new employer."
-                )
-            elif "citizen" in visa_status.lower() or "green card" in visa_status.lower():
-                return "I am authorized to work in the US and do not require visa sponsorship."
-            return "I am authorized to work in the US."
-
-        # Location/Remote
-        if "remote" in question_lower:
-            loc_prefs = user_data.get("location_preferences", {})
-            if isinstance(loc_prefs, dict) and loc_prefs.get("remote_only"):
-                return "Yes, I am open to and prefer remote work opportunities."
-            return "I am open to remote, hybrid, or onsite work depending on the role."
-
-        if "relocate" in question_lower:
-            return "I am open to discussing relocation for the right opportunity."
-
-        # Default answer
-        return "I would be happy to discuss this further during our conversation."
+            import json
+            answers = json.loads(response.choices[0].message.content)
+            logger.info(f"Answers generated for role: {parsed_jd.role}")
+            return answers
+        except Exception as e:
+            logger.error(f"Answers generation failed: {e}")
+            raise
