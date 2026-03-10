@@ -114,12 +114,18 @@ class JSearchSource:
                 "total_returned": len(data.get("data", [])),
                 "sample": [
                     {
-                        "title":       j.get("job_title"),
-                        "company":     j.get("employer_name"),
-                        "location":    f"{j.get('job_city','')} {j.get('job_state','')} {j.get('job_country','')}".strip(),
-                        "job_url":     j.get("job_url", "")[:80],
-                        "has_job_url": bool(j.get("job_url", "").strip()),
-                        "posted_at":   j.get("job_posted_at_datetime_utc"),
+                        "title":         j.get("job_title"),
+                        "company":       j.get("employer_name"),
+                        "location":      f"{j.get('job_city','')} {j.get('job_state','')} {j.get('job_country','')}".strip(),
+                        "job_url":       j.get("job_url", "")[:80],
+                        "job_apply_link":j.get("job_apply_link", "")[:80],
+                        "job_id":        j.get("job_id", ""),
+                        "has_job_url":   bool(j.get("job_url", "").strip()),
+                        "has_apply_link":bool(j.get("job_apply_link", "").strip()),
+                        "source_url_will_be": (
+                            j.get("job_apply_link") or j.get("job_url") or f"jsearch://{j.get('job_id','unknown')}"
+                        )[:80],
+                        "posted_at":     j.get("job_posted_at_datetime_utc"),
                     }
                     for j in jobs
                 ],
@@ -154,7 +160,7 @@ class JSearchSource:
         query = f"{expanded_keywords} in {location}" if location else expanded_keywords
 
         while len(jobs) < max_results and page <= pages_needed:
-            params: Dict[str, Any] = {"query": query, "page": page, "num_pages": 1}
+            params: Dict[str, Any] = {"query": query, "page": 1, "num_pages": 1}
 
             if date_posted:
                 params["date_posted"] = date_posted
@@ -213,9 +219,14 @@ class JSearchSource:
         """
         Normalize a raw JSearch job.
 
-        job_url must be non-empty — it is stored as source_url (UNIQUE column).
-        Empty job_url causes IntegrityError on the second insert which rolls
-        back silently, swallowing the whole batch with zero error counts.
+        source_url (UNIQUE dedup key) priority:
+          1. job_apply_link  — direct employer / ATS link, always present
+          2. job_url         — Google Jobs URL, sometimes absent
+          3. jsearch://{id}  — synthetic fallback, guaranteed unique per listing
+
+        JSearch stopped reliably populating job_url for aggregated listings
+        (returns "" for most results as of early 2026).  job_apply_link is the
+        stable identifier we should use.
         """
         try:
             title   = raw.get("job_title", "").strip()
@@ -231,27 +242,37 @@ class JSearchSource:
 
             description = raw.get("job_description", "").strip()
             job_url     = raw.get("job_url", "").strip()
-
-            if not job_url:
-                logger.warning(f"Skipping job with no job_url: '{title}' @ '{company}'")
-                return None
+            apply_link  = raw.get("job_apply_link", "").strip()
+            job_id      = raw.get("job_id", "").strip()
 
             if not title or not company:
                 logger.debug(f"Skipping job missing title or company: title='{title}' company='{company}'")
                 return None
 
-            # description can be very short for some aggregator listings — keep them
-            # but log so we can monitor quality
             if not description:
                 logger.debug(f"Job has no description: '{title}' @ '{company}' — skipping")
                 return None
 
-            apply_link = (raw.get("job_apply_link") or job_url).strip()
-            posted_at  = raw.get("job_posted_at_datetime_utc")
+            # Determine source_url (UNIQUE DB column — must be non-empty).
+            # Priority: apply_link > job_url > synthetic jsearch://job_id
+            source_url = apply_link or job_url
+            if not source_url:
+                if job_id:
+                    source_url = f"jsearch://{job_id}"
+                    logger.debug(f"Synthetic source_url for '{title}' @ '{company}': {source_url}")
+                else:
+                    # No URL and no ID — can't deduplicate safely, skip.
+                    logger.warning(f"Skipping job with no URL or ID: '{title}' @ '{company}'")
+                    return None
+
+            # apply_link shown to user for "Apply" button — prefer the direct link.
+            user_apply_link = apply_link or job_url or source_url
+
+            posted_at = raw.get("job_posted_at_datetime_utc")
 
             return {
-                "url":             job_url,
-                "apply_link":      apply_link,
+                "url":             source_url,       # → jobs_raw.source_url (UNIQUE)
+                "apply_link":      user_apply_link,  # → jobs_raw.apply_link (user-facing)
                 "title":           title,
                 "company":         company,
                 "location":        location,
