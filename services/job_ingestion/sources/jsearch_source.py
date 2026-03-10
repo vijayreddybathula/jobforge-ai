@@ -104,7 +104,7 @@ class JSearchSource:
         if date_posted:
             params["date_posted"] = date_posted
         try:
-            r = requests.get(f"{JSEARCH_BASE_URL}/search", headers=self.headers, params=params, timeout=15)
+            r = requests.get(f"{JSEARCH_BASE_URL}/search", headers=self.headers, params=params, timeout=20)
             data = r.json()
             jobs = data.get("data", [])[:num_results]
             return {
@@ -144,74 +144,80 @@ class JSearchSource:
         """
         Search jobs via JSearch and return normalized list.
 
+        Fetches in a single request using num_pages to get up to max_results
+        results. JSearch returns ~10 results per page; for max_results <= 10
+        we use num_pages=1 (single fast call). For larger requests we use
+        ceil(max_results / 10) pages in one API call.
+
         Keywords are expanded via KEYWORD_ALIASES before sending to JSearch
         so niche terms like 'GenAI Engineer' are mapped to broader equivalents
         that Google Jobs (underlying JSearch) actually indexes.
         """
-        # Expand keywords to JSearch-friendly terms
         expanded_keywords = _expand_keywords(keywords)
         if expanded_keywords != keywords:
             logger.info(f"Search: '{keywords}' expanded to '{expanded_keywords}'")
 
-        jobs: List[Dict[str, Any]] = []
-        page = 1
-        pages_needed = max(1, -(-max_results // 10))  # ceil division
-
         query = f"{expanded_keywords} in {location}" if location else expanded_keywords
+        num_pages = max(1, -(-max_results // 10))  # ceil(max_results / 10)
 
-        while len(jobs) < max_results and page <= pages_needed:
-            params: Dict[str, Any] = {"query": query, "page": 1, "num_pages": 1}
+        params: Dict[str, Any] = {
+            "query":     query,
+            "page":      1,
+            "num_pages": num_pages,
+        }
 
-            if date_posted:
-                params["date_posted"] = date_posted
+        if date_posted:
+            params["date_posted"] = date_posted
 
-            if work_type:
-                if work_type.lower() == "remote":
-                    params["remote_jobs_only"] = "true"
-                elif "remote" not in work_type.lower():
-                    params["remote_jobs_only"] = "false"
-                # mixed (remote,hybrid) — omit the flag for broader results
+        if work_type:
+            if work_type.lower() == "remote":
+                params["remote_jobs_only"] = "true"
+            elif "remote" not in work_type.lower():
+                params["remote_jobs_only"] = "false"
+            # mixed (remote,hybrid) — omit the flag for broader results
 
-            try:
-                response = requests.get(
-                    f"{JSEARCH_BASE_URL}/search",
-                    headers=self.headers, params=params, timeout=15,
-                )
-            except requests.exceptions.Timeout:
-                raise JSearchAPIError("JSearch API timed out after 15s")
-            except requests.exceptions.ConnectionError as e:
-                raise JSearchAPIError(f"JSearch API connection failed: {e}")
-            except Exception as e:
-                raise JSearchAPIError(f"JSearch API request failed: {e}")
+        try:
+            response = requests.get(
+                f"{JSEARCH_BASE_URL}/search",
+                headers=self.headers,
+                params=params,
+                timeout=30,  # JSearch can be slow on multi-page requests
+            )
+        except requests.exceptions.Timeout:
+            raise JSearchAPIError("JSearch API timed out after 30s")
+        except requests.exceptions.ConnectionError as e:
+            raise JSearchAPIError(f"JSearch API connection failed: {e}")
+        except Exception as e:
+            raise JSearchAPIError(f"JSearch API request failed: {e}")
 
-            if not response.ok:
-                raise JSearchAPIError(
-                    f"JSearch API returned HTTP {response.status_code}",
-                    status_code=response.status_code,
-                    body=response.text[:500],
-                )
+        if not response.ok:
+            raise JSearchAPIError(
+                f"JSearch API returned HTTP {response.status_code}",
+                status_code=response.status_code,
+                body=response.text[:500],
+            )
 
-            try:
-                data = response.json()
-            except Exception as e:
-                raise JSearchAPIError(f"JSearch API returned non-JSON response: {e}")
+        try:
+            data = response.json()
+        except Exception as e:
+            raise JSearchAPIError(f"JSearch API returned non-JSON response: {e}")
 
-            raw_jobs = data.get("data", [])
-            if not raw_jobs:
-                logger.info(f"JSearch returned 0 results for query='{query}' page={page} date_posted={date_posted}")
+        raw_jobs = data.get("data", [])
+        if not raw_jobs:
+            logger.info(f"JSearch returned 0 results for query='{query}' date_posted={date_posted}")
+            return []
+
+        jobs: List[Dict[str, Any]] = []
+        for raw in raw_jobs:
+            if len(jobs) >= max_results:
                 break
-
-            for raw in raw_jobs:
-                if len(jobs) >= max_results:
-                    break
-                normalized = self._normalize(raw)
-                if normalized:
-                    jobs.append(normalized)
-            page += 1
+            normalized = self._normalize(raw)
+            if normalized:
+                jobs.append(normalized)
 
         logger.info(
             f"JSearch: {len(jobs)} jobs for '{expanded_keywords}' in '{location}' "
-            f"(original='{keywords}', date_posted={date_posted})"
+            f"(original='{keywords}', date_posted={date_posted}, fetched={len(raw_jobs)})"
         )
         return jobs
 
