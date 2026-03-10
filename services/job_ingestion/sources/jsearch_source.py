@@ -10,8 +10,6 @@ logger = get_logger(__name__)
 JSEARCH_BASE_URL = "https://jsearch.p.rapidapi.com"
 
 # Default freshness window — only ingest jobs posted in the last week.
-# Older postings are often already closed on the original job board (Dice,
-# Indeed, LinkedIn redirect) by the time we click them.
 DEFAULT_DATE_POSTED = "week"
 
 
@@ -85,14 +83,10 @@ class JSearchSource:
                 params["date_posted"] = date_posted
 
             if work_type:
-                # JSearch remote_jobs_only only understands remote vs not-remote.
-                # For hybrid/onsite we leave it unset — the keywords + location
-                # are a better filter and JSearch's work-type support is limited.
                 if work_type.lower() == "remote":
                     params["remote_jobs_only"] = "true"
                 elif "remote" not in work_type.lower():
                     params["remote_jobs_only"] = "false"
-                # mixed (remote,hybrid) — omit the flag, broader results
 
             try:
                 response = requests.get(
@@ -134,15 +128,17 @@ class JSearchSource:
         return jobs
 
     def _normalize(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Normalize a raw JSearch job.
+        """
+        Normalize a raw JSearch job.
 
-        Key distinction:
-          url        = job_url  — JSearch's own tracking/canonical URL.
-                                  Stable, unique per job, used as dedup key.
-          apply_link = job_apply_link  — The actual employer/ATS application link.
-                                  This is what we show the user to click Apply.
-                                  Can be a Dice/Indeed/LinkedIn redirect that
-                                  may expire, so we fall back to url if missing.
+        CRITICAL: job_url must be non-empty — it is stored as source_url which
+        has a UNIQUE constraint in the DB.  If two jobs have empty job_url they
+        both resolve to "" and the second INSERT violates the constraint, causing
+        a silent rollback that swallows the entire batch without error counts.
+        Jobs with no job_url are skipped here.
+
+        url        = job_url  — JSearch canonical URL, stable dedup key.
+        apply_link = job_apply_link — Actual employer/ATS link shown to user.
         """
         try:
             title   = raw.get("job_title", "").strip()
@@ -158,23 +154,25 @@ class JSearchSource:
 
             description = raw.get("job_description", "").strip()
 
-            # job_url is the canonical JSearch URL — always present, always stable.
-            # Use this as the dedup key (source_url in DB).
+            # job_url is the canonical JSearch URL — must be non-empty.
             job_url = raw.get("job_url", "").strip()
 
-            # job_apply_link is the direct employer ATS URL shown to the user.
-            # Falls back to job_url if not present.
-            apply_link = (raw.get("job_apply_link") or job_url).strip()
+            # Skip jobs with no canonical URL — they cannot be safely deduped
+            # and will break the unique constraint on source_url.
+            if not job_url:
+                logger.warning(f"Skipping job with empty job_url: '{title}' @ '{company}'")
+                return None
 
-            posted_at = raw.get("job_posted_at_datetime_utc")
+            apply_link = (raw.get("job_apply_link") or job_url).strip()
+            posted_at  = raw.get("job_posted_at_datetime_utc")
 
             if not title or not company or not description:
-                logger.debug(f"Skipping incomplete job: {title} @ {company}")
+                logger.debug(f"Skipping incomplete job: title={bool(title)} company={bool(company)} desc={bool(description)}")
                 return None
 
             return {
-                "url":             job_url,    # used as source_url (dedup key)
-                "apply_link":      apply_link, # shown to user on Apply button
+                "url":             job_url,
+                "apply_link":      apply_link,
                 "title":           title,
                 "company":         company,
                 "location":        location,

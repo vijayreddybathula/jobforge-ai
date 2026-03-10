@@ -1,11 +1,12 @@
 """Job ingestion service."""
 
 from typing import List, Dict, Any, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
-from packages.database.models import JobRaw, IngestionSource, ScrapingSession
+from packages.database.models import JobRaw
 from packages.database.connection import get_db
 from packages.common.rate_limiter import RateLimiter
 from packages.common.redis_cache import get_redis_cache
@@ -14,9 +15,7 @@ from services.job_ingestion.normalizer import JobNormalizer
 
 logger = get_logger(__name__)
 
-# How old a job must be (in days) before we allow re-ingesting a title+company
-# match as a genuinely new posting.  Prevents duplicates from re-searches but
-# lets the same role be re-posted weeks later as a real new listing.
+# Soft dedup window: same title+company+source within this many days = duplicate.
 _SOFT_DEDUP_WINDOW_DAYS = 14
 
 
@@ -44,35 +43,40 @@ class IngestionService:
         """
         Ingest a single job posting.
 
-        Deduplication strategy (two layers):
+        Deduplication (two layers):
+          Layer 1 — content_hash: exact/near-exact reposts.
+          Layer 2 — soft dedup on (title_norm, company_norm, source) within
+                    _SOFT_DEDUP_WINDOW_DAYS: same role re-fetched with slightly
+                    different description wording (JSearch does this).
 
-        Layer 1 — content_hash (title + company + desc[:1000]):
-          Catches exact or near-exact reposts.
-
-        Layer 2 — soft dedup on (title_norm, company_norm, source):
-          Catches the same role re-fetched with slightly different description
-          wording (JSearch does this across searches).  If a job with the same
-          normalised title + company was ingested within _SOFT_DEDUP_WINDOW_DAYS,
-          treat it as a duplicate and update apply_link only.
-
-        apply_link:  direct ATS/employer URL shown on the Apply button.
-        source_url:  canonical dedup URL (e.g. JSearch’s job_url).
+        source_url MUST be non-empty — it is a UNIQUE column. Callers
+        (jsearch_source._normalize) already enforce this, but we double-check
+        here and return FAILED rather than letting a DB IntegrityError swallow
+        the whole batch silently.
         """
         if db is None:
             db = next(get_db())
 
+        # Guard: never attempt to insert with empty source_url — it would
+        # succeed for job #1 then blow up with IntegrityError for every
+        # subsequent job, rolling back the whole transaction silently.
+        if not source_url or not source_url.strip():
+            logger.warning(f"Skipping job with empty source_url: '{title}' @ '{company}'")
+            return {"job_id": None, "ingest_status": "FAILED",
+                    "error": "source_url is empty — cannot guarantee dedup"}
+
         try:
-            normalized    = self.normalizer.normalize(
+            normalized   = self.normalizer.normalize(
                 title=title, company=company, location=location, description=description
             )
-            content_hash  = normalized["content_hash"]
-            title_norm    = normalized["title"]
-            company_norm  = normalized["company"]
+            content_hash = normalized["content_hash"]
+            title_norm   = normalized["title"]
+            company_norm = normalized["company"]
 
-            # ── Layer 1: exact content-hash dedup ──────────────────────────────
+            # ── Layer 1: exact content-hash dedup ────────────────────────────
             seen_key = f"jobs:seen:{content_hash}"
             if self.cache.is_in_set(seen_key, content_hash):
-                logger.debug(f"Job already seen (cache): {content_hash[:8]}")
+                logger.debug(f"Duplicate (cache): {content_hash[:8]}")
                 return {"job_id": None, "ingest_status": "DUPLICATE", "dedupe": True}
 
             existing_hash = db.query(JobRaw).filter(JobRaw.content_hash == content_hash).first()
@@ -83,11 +87,7 @@ class IngestionService:
                 self.cache.add_to_set(seen_key, content_hash)
                 return {"job_id": existing_hash.job_id, "ingest_status": "DUPLICATE", "dedupe": True}
 
-            # ── Layer 2: soft dedup on title + company + source within window ───
-            # JSearch returns the same role with slightly different descriptions
-            # on repeated searches, producing a new content_hash each time.
-            # If title_norm + company_norm + source already exist and the job
-            # was ingested within the last 14 days, treat it as a duplicate.
+            # ── Layer 2: soft dedup — same role within window ─────────────────
             window_cutoff = datetime.utcnow() - timedelta(days=_SOFT_DEDUP_WINDOW_DAYS)
             existing_soft = (
                 db.query(JobRaw)
@@ -100,17 +100,15 @@ class IngestionService:
                 .first()
             )
             if existing_soft:
-                # Update apply_link if we have a fresher one
                 if apply_link and not existing_soft.apply_link:
                     existing_soft.apply_link = apply_link
                     db.commit()
                 logger.debug(
-                    f"Soft-dedup hit: '{title_norm}' @ '{company_norm}' already ingested "
-                    f"within {_SOFT_DEDUP_WINDOW_DAYS}d (id={existing_soft.job_id})"
+                    f"Soft-dedup: '{title_norm}' @ '{company_norm}' seen within {_SOFT_DEDUP_WINDOW_DAYS}d"
                 )
                 return {"job_id": existing_soft.job_id, "ingest_status": "DUPLICATE", "dedupe": True}
 
-            # ── New job ──────────────────────────────────────────────────────────────
+            # ── New job ───────────────────────────────────────────────────────
             job = JobRaw(
                 source=source,
                 source_url=source_url,
@@ -136,18 +134,25 @@ class IngestionService:
             db.commit()
             db.refresh(job)
             self.cache.add_to_set(seen_key, content_hash)
-            logger.info(f"Job ingested: {job.job_id} '{title_norm}' @ '{company_norm}' from {source}")
+            logger.info(f"Ingested: '{title_norm}' @ '{company_norm}' [{source}] id={job.job_id}")
             return {"job_id": job.job_id, "ingest_status": "INGESTED", "dedupe": False}
 
+        except IntegrityError as e:
+            db.rollback()
+            # IntegrityError on source_url means a race condition or the URL
+            # was already in DB with a different content_hash. Treat as duplicate.
+            logger.warning(f"IntegrityError ingesting '{title}' @ '{company}': {e.orig} — treating as duplicate")
+            return {"job_id": None, "ingest_status": "DUPLICATE", "dedupe": True}
+
         except Exception as e:
-            logger.error(f"Job ingestion failed: {e}")
+            logger.error(f"Job ingestion failed for '{title}' @ '{company}': {e}")
             db.rollback()
             return {"job_id": None, "ingest_status": "FAILED", "error": str(e)}
 
     def ingest_batch(
         self, jobs: List[Dict[str, Any]], source: str, db: Optional[Session] = None
     ) -> Dict[str, Any]:
-        """Ingest multiple jobs."""
+        """Ingest multiple jobs, each in its own transaction."""
         if db is None:
             db = next(get_db())
 
@@ -166,16 +171,19 @@ class IngestionService:
                 posted_at=job_data.get("posted_at"),
                 db=db,
             )
-            if result["ingest_status"] == "INGESTED":
+            status = result["ingest_status"]
+            if status == "INGESTED":
                 results["ingested"] += 1
                 results["job_ids"].append(result["job_id"])
-            elif result["ingest_status"] == "DUPLICATE":
+            elif status == "DUPLICATE":
                 results["duplicates"] += 1
             else:
                 results["failed"] += 1
+                logger.warning(f"Failed to ingest: {result.get('error', 'unknown error')}")
 
         logger.info(
-            f"Batch ingestion: {results['ingested']} ingested, "
-            f"{results['duplicates']} duplicates, {results['failed']} failed"
+            f"Batch complete: {results['ingested']} ingested, "
+            f"{results['duplicates']} duplicates, {results['failed']} failed "
+            f"(of {results['total']} fetched)"
         )
         return results
